@@ -5,6 +5,16 @@ instead of an overscaled framebuffer — then put your desktop back when it exit
 
 Written for GNOME/Mutter on Wayland. Works with Flatpak Steam.
 
+> **Built with [Claude](https://claude.ai) by Anthropic.** AI makes mistakes,
+> and this one changes your display configuration — read the script before you
+> run it. That said, it isn't unvalidated: every claim in this README was
+> measured on the hardware it was written for, a Lenovo Legion Pro 7i
+> (2560×1600 at 133%) running Fedora Silverblue 44 with GNOME 50.3 and Flatpak
+> Steam, including the multi-monitor numbers below, and the repo has tests that
+> stub `gdctl` and assert on the exact configuration it would apply. Behaviour
+> on other GNOME versions, other compositors, or hardware I couldn't test is
+> less certain — issues welcome.
+
 ---
 
 ## The problem
@@ -154,6 +164,14 @@ Restart Steam after any of these.
 ```sh
 ./install.sh --uninstall            # or: curl -fsSL .../install.sh | sh -s -- --uninstall
 ```
+
+Add `--dry-run` to either the install or the uninstall to print every action
+without taking any — worth doing before an install that grants a sandbox you
+care about four permissions.
+
+The uninstaller finds a custom `GAMESCALE_BINDIR` install without being told
+again: it checks the variable, then `PATH`, then the read-only grant given to
+Steam.
 
 Restores your display first if a run died and left it at 1×, then removes the
 binary, the state directory, the systemd unit, and the Steam overrides.
