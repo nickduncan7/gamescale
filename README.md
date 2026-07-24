@@ -65,6 +65,22 @@ pixels than if you'd never run it. Since v1.1.0 every monitor is set to 1×
 together, and the whole layout — scales, positions, transforms, which display
 was primary — is saved and replayed on exit.
 
+### Why not restore the desktop once the game has started?
+
+Tempting, since a game reads the resolution at startup: hold 1× for a few
+seconds, then put fractional scaling back and enjoy a normal desktop for the
+rest of the session.
+
+Tested on Halo Campaign Evolved under Proton 11: it doesn't hold. Wine tracks
+RandR events and rebuilds its virtual monitor list, and the game followed the
+screen straight back to the overscaled framebuffer the moment the desktop scale
+was restored — MangoHud's resolution readout went from 2560×1600 to 3840×2400.
+
+Note that framerate did **not** change, and the image still looked sharp. At
+factor 2 it always does; the cost is 2.25× the pixels, not visible quality. Any
+test of this by eye or by FPS on a GPU with headroom will report success when
+it has actually failed. That's why the scope is the whole session.
+
 ### What about `xwayland-native-scaling`?
 
 GNOME 48+ ships an experimental feature aimed at this:
@@ -268,13 +284,21 @@ that runs.
 
 **2. Host-side watchdog.** Before launching, the script takes an `flock` on a
 file in the shared state directory and starts a watchdog through
-`systemd-run --user`. The watchdog blocks trying to acquire that same lock. FD 9
-is inherited across fork and exec, so every process in the game's tree holds it,
-and the kernel releases it only when the last one is gone — normal exit,
+`systemd-run --user`. The watchdog blocks trying to acquire that same lock. The
+wrapper holds FD 9 for as long as it sits waiting on the launch chain, and the
+kernel releases it when that process dies for any reason — normal exit,
 `SIGKILL`, segfault, OOM kill, Ctrl+C on Steam, all identical. The watchdog then
 wakes on the host, where D-Bus is still alive, and restores. No polling, no
 heartbeat, no timeout race. systemd owns the watchdog, so it outlives the
 sandbox that spawned it.
+
+The descriptor is *not* inherited by the game itself, despite being inheritable
+across fork and exec. Under pressure-vessel the game is started through the
+Flatpak portal by `steam-runtime-launch-client`, so it isn't a descendant of the
+wrapper at all — `lsof` on the lock shows the wrapper and the watchdog, never
+`reaper`, `pv-adverb` or `bwrap`. The lifetime still lines up, because the
+wrapper blocks until the chain exits, but what the lock actually tracks is the
+wrapper, not the game.
 
 **3. Login reconcile.** A user unit runs `--restore` on session start, covering
 a hard reboot or a killed watchdog.
@@ -343,16 +367,34 @@ overscaled framebuffer. Under `gamescale` it should read `2560 x 1600`. This is
 also the quickest way to check whether the problem in this README is one you
 actually have.
 
+That reports the screen, not what the game chose to do with it. For the game's
+own swapchain, use MangoHud:
+
+```
+MANGOHUD_CONFIG=fps,resolution gamescale %command%
+```
+
+This is the least ambiguous check there is. A game honouring the reported mode
+and a game ignoring it look identical, and cost 2.25× apart.
+
 Then test the lock, because it's the load-bearing part. While a game is
 running:
 
 ```sh
-flock -n ~/.local/state/gamescale/lock -c true   # must FAIL
+flock -n ~/.local/state/gamescale/lock -c true; echo $?   # want 1
 ```
 
-If that *succeeds*, the lock isn't being held through Steam's launch chain and
-the watchdog may restore mid-game — worse than no watchdog at all. Set
-`GAMESCALE_NO_WATCH=1` and open an issue.
+Check the exit code, not the output — `flock -n` prints nothing whether it
+acquires the lock or not, so silence proves nothing. `1` means it could not
+acquire, which is what you want. `0` means the lock isn't being held through
+Steam's launch chain and the watchdog may restore mid-game — worse than no
+watchdog at all. Set `GAMESCALE_NO_WATCH=1` and open an issue.
+
+To see who actually holds it:
+
+```sh
+lsof ~/.local/state/gamescale/lock
+```
 
 And check the watchdog is actually up:
 
