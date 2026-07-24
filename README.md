@@ -223,6 +223,15 @@ so the watchdog, the login unit, and your shell all see the same file.
   panel. Multi-monitor configs use the logical monitor marked primary.
 - If anything is unavailable, the game still launches, unmodified. A failed
   scale flip should never mean a failed game launch.
+- The state file is written to a sibling and renamed, so a reader sees the
+  whole old state or the whole new one — never a truncated scale. A partial
+  write here is worse than no state at all: `gdctl` rejects the bad value,
+  every restore layer fails identically, and the retry logic keeps you at 1×.
+- It is parsed as strict `key=value`, never sourced. The state directory is
+  writable by the sandboxed app being launched, and `--restore` runs on the
+  host from the login unit — sourcing it there would execute its contents
+  outside the sandbox at every session start. Unknown keys and malformed
+  values fail closed.
 
 ---
 

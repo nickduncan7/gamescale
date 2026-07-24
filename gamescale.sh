@@ -229,25 +229,73 @@ set_setting() { host gsettings set "$IFACE_SCHEMA" "$1" "$2"; }
 # the watchdog, the login unit, and your shell can all reach it.
 # ---------------------------------------------------------------------------
 
+# Written to a sibling and renamed. Rename is atomic within a filesystem, so a
+# reader sees either the whole old state or the whole new one — never a
+# half-flushed line. Worth the extra syscall: a plain redirect is truncated by
+# exactly the events this tool exists to survive (OOM kill, sandbox teardown,
+# power loss), and a state file holding a truncated scale is worse than none.
+# gdctl rejects the bad value, every restore layer fails identically, and the
+# retry logic then keeps you stranded at 1x instead of recovering.
 state_write() {
     host mkdir -p "$STATE_DIR" 2>/dev/null
     printf 'connector=%s\nscale=%s\ntext_scale=%s\ncursor_size=%s\n' \
-        "$1" "$2" "$3" "$4" | host sh -c "umask 077; cat > '$STATE_FILE'"
+        "$1" "$2" "$3" "$4" \
+        | host sh -c "umask 077; cat > '$STATE_FILE.new' \
+                      && mv -f '$STATE_FILE.new' '$STATE_FILE'"
 }
 
 state_read()   { host cat "$STATE_FILE" 2>/dev/null; }
 state_exists() { host test -r "$STATE_FILE"; }
 state_clear()  { host rm -f "$STATE_FILE"; }
 
+is_number()    { [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]; }
+is_integer()   { [[ "$1" =~ ^[0-9]+$ ]]; }
+# Permissive enough for eDP-1, DP-2 and HDMI-A-1; strict enough that nothing
+# reaching gdctl can carry whitespace, quotes or shell metacharacters.
+is_connector() { [[ "$1" =~ ^[A-Za-z0-9]+([-_][A-Za-z0-9]+)*$ ]]; }
+
+# Strict key=value parse — deliberately NOT `source`. The state directory is
+# writable by the sandboxed app we launch, and restore_now() also runs on the
+# host from the login unit, where sourcing that file would execute its contents
+# outside the sandbox at every session start. Unknown keys and malformed values
+# fail closed rather than being ignored: a state file we don't fully understand
+# is one we shouldn't replay onto your display.
+#
+# Assigns into the caller's locals (bash dynamic scope); leaves them untouched
+# on failure.
+state_parse() {
+    local blob line key value
+    blob=$(state_read) || return 1
+    [[ -n "$blob" ]] || return 1
+
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        [[ "$key" != "$line" ]] || return 1
+        case "$key" in
+            connector)   is_connector "$value" && connector="$value"   || return 1 ;;
+            scale)       is_number    "$value" && scale="$value"       || return 1 ;;
+            text_scale)  is_number    "$value" && text_scale="$value"  || return 1 ;;
+            cursor_size) is_integer   "$value" && cursor_size="$value" || return 1 ;;
+            *) return 1 ;;
+        esac
+    done <<<"$blob"
+
+    [[ -n "$connector" && -n "$scale" ]]
+}
+
 # Idempotent: safe to call from the trap, the watchdog, and the login unit,
 # in any order or all at once. First one to finish clears the state.
 restore_now() {
-    local blob connector="" scale="" text_scale="" cursor_size=""
-    blob=$(state_read) || return 1
-    [[ -n "$blob" ]] || return 1
-    # shellcheck disable=SC1090
-    source /dev/stdin <<<"$blob"
-    [[ -n "$connector" && -n "$scale" ]] || return 1
+    local connector="" scale="" text_scale="" cursor_size=""
+    state_exists || return 1
+    if ! state_parse; then
+        warn "state at $STATE_FILE is malformed — refusing to replay it"
+        warn "recover by hand with: gdctl set --logical-monitor --primary \\"
+        warn "    --monitor <connector> --scale <scale>   (see gdctl show)"
+        return 1
+    fi
 
     log "restoring $connector @ $scale (text $text_scale, cursor $cursor_size)"
     if ! set_scale "$connector" "$scale"; then
