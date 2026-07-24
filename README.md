@@ -181,8 +181,9 @@ It will **not** touch Steam overrides you added yourself. `flatpak override
 anything in there that isn't gamescale's, the uninstaller prints what to drop
 and leaves the file alone. Don't reach for `--nofilesystem` or `--unset-env` to
 do it by hand: those record explicit *denials* rather than removing a grant,
-and `--unset-env=PATH` wipes Steam's own `PATH` — `/app/bin` and
-`/app/utils/bin` disappear, taking gamescope and MangoHud with them.
+and `--unset-env=PATH` wipes Steam's own `PATH`, losing `/app/bin` and
+`/app/utils/bin`. (gamescope and MangoHud survive that — Steam's launcher adds
+their Vulkan extension directories itself at startup, independent of `PATH`.)
 
 ### Login reconcile service
 
