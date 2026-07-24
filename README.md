@@ -50,40 +50,76 @@ game runs — poor man's fractional scaling — and reverts both on exit.
 ## Install
 
 ```sh
-mkdir -p ~/.local/bin ~/.local/state/gamescale
-cp gamescale.sh ~/.local/bin/
-chmod +x ~/.local/bin/gamescale.sh
+curl -fsSL https://raw.githubusercontent.com/proto-cool/gamescale/main/install.sh | sh
 ```
+
+Installs to `~/.local/bin/gamescale`, applies the Flatpak Steam grants below,
+installs the login reconcile unit, and runs `--doctor`. It prints every action,
+needs no root, and is safe to re-run. `GAMESCALE_NO_FLATPAK=1` or
+`GAMESCALE_NO_UNIT=1` to opt out of either half; `GAMESCALE_REF=v1.0.0` to pin
+a version.
+
+If you'd rather not pipe a URL into a shell — reasonable, given this script
+asks for portal access to your session — clone and read it first:
+
+```sh
+git clone https://github.com/proto-cool/gamescale && cd gamescale
+./install.sh          # installs the gamescale.sh sitting next to it
+```
+
+Or do it by hand:
+
+```sh
+mkdir -p ~/.local/bin ~/.local/state/gamescale
+install -m 755 gamescale.sh ~/.local/bin/gamescale
+```
+
+`~/.local/bin` is on `$PATH` on most distributions, so `gamescale` is now a
+command. The script finds its own path, so the installed name is yours to
+choose.
 
 ### Flatpak Steam
 
-The sandbox can't see your script, can't reach the host session, and can't
-write shared state without three grants:
+The installer does all of this for you; it's spelled out because you should
+know what you granted.
+
+The sandbox can't see your script, can't reach the host session, can't write
+shared state, and can't resolve the name without four grants:
 
 ```sh
 flatpak override --user \
     --filesystem="$HOME/.local/bin:ro" \
     --filesystem="$HOME/.local/state/gamescale:create" \
     --talk-name=org.freedesktop.Flatpak \
+    --env=PATH="/app/bin:/app/utils/bin:/usr/bin:$HOME/.local/bin" \
     com.valvesoftware.Steam
 ```
 
 `--talk-name=org.freedesktop.Flatpak` is what `flatpak-spawn --host` rides on.
 Without it the script detects the sandbox, finds it can't reach `gdctl`, and
-passes your game through unmodified. Restart Steam after.
+passes your game through unmodified.
+
+`--env=PATH` is what lets the launch option be a bare `gamescale` instead of an
+absolute path — the sandbox PATH is `/app/bin:/app/utils/bin:/usr/bin` and has
+no notion of your home directory. Note that it *replaces* the sandbox PATH
+rather than extending it, so if a future Steam release adds a directory you
+won't get it; `--doctor` checks the stock entries are still present and tells
+you to re-apply if not. Skip this grant if you'd rather paste the full path.
+
+Restart Steam after any of these.
 
 ### Login reconcile service
 
 Covers the case where the machine goes down mid-game:
 
 ```sh
-gamescale.sh --install-unit
+gamescale --install-unit
 ```
 
 ### Verify
 
 ```sh
-gamescale.sh --doctor
+gamescale --doctor
 ```
 
 Checks each moving part separately — portal reachability, `gdctl`,
@@ -94,23 +130,24 @@ monitor detection, stale state. When something breaks later, this tells you
 From inside the sandbox specifically:
 
 ```sh
-flatpak run --command="$HOME/.local/bin/gamescale.sh" com.valvesoftware.Steam --doctor
+flatpak run --command=gamescale com.valvesoftware.Steam --doctor
 ```
 
 ---
 
 ## Use
 
-Steam launch options (absolute path — Steam won't expand `~`):
+Steam launch options — bare name if you applied the `--env=PATH` grant above,
+otherwise the absolute path (Steam won't expand `~`):
 
 ```
-/home/YOU/.local/bin/gamescale.sh %command%
+gamescale %command%
 ```
 
 Anywhere else:
 
 ```sh
-gamescale.sh -- /path/to/game
+gamescale -- /path/to/game
 ```
 
 ### Commands
@@ -219,7 +256,7 @@ systemctl --user list-units 'gamescale-*'
 If your desktop is stuck at 1×:
 
 ```sh
-gamescale.sh --restore
+gamescale --restore
 ```
 
 If the state file is gone too, set it directly:

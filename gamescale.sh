@@ -27,18 +27,23 @@
 # SETUP
 #
 #   mkdir -p ~/.local/bin ~/.local/state/gamescale
-#   cp gamescale.sh ~/.local/bin/ && chmod +x ~/.local/bin/gamescale.sh
+#   cp gamescale.sh ~/.local/bin/gamescale && chmod +x ~/.local/bin/gamescale
 #
 #   flatpak override --user \
 #       --filesystem="$HOME/.local/bin:ro" \
 #       --filesystem="$HOME/.local/state/gamescale:create" \
 #       --talk-name=org.freedesktop.Flatpak \
+#       --env=PATH="/app/bin:/app/utils/bin:/usr/bin:$HOME/.local/bin" \
 #       com.valvesoftware.Steam
 #
-#   gamescale.sh --doctor          verify every moving part
-#   gamescale.sh --install-unit    install the login reconcile service
+#   The --env=PATH grant is what makes the launch option a bare name; the
+#   sandbox PATH does not include ~/.local/bin by default. It REPLACES the
+#   sandbox PATH, so --doctor checks the stock entries are still present.
 #
-#   Steam launch option:  /home/YOU/.local/bin/gamescale.sh %command%
+#   gamescale --doctor          verify every moving part
+#   gamescale --install-unit    install the login reconcile service
+#
+#   Steam launch option:  gamescale %command%
 #
 # ENV
 #   GAMESCALE_SCALE     scale while playing        (default: 1)
@@ -52,6 +57,15 @@ set -uo pipefail
 readonly IFACE_SCHEMA="org.gnome.desktop.interface"
 readonly WATCHDOG_TIMEOUT=43200   # 12h ceiling; watchdog self-terminates after
 GAME_SCALE="${GAMESCALE_SCALE:-1}"
+
+# Absolute path to this script. The watchdog and the login unit both re-invoke
+# it from the host, so a bare "$0" from a PATH lookup is not enough. Granted
+# directories are mounted at the same absolute path inside the sandbox, so one
+# resolved path is valid on both sides.
+SELF="$0"
+[[ "$SELF" == */* ]] || SELF=$(command -v -- "$SELF" 2>/dev/null || printf '%s' "$SELF")
+SELF=$(readlink -f -- "$SELF" 2>/dev/null || printf '%s' "$SELF")
+readonly SELF
 
 log()  { [[ "${GAMESCALE_DEBUG:-0}" == "1" ]] && echo "gamescale: $*" >&2; return 0; }
 warn() { echo "gamescale: $*" >&2; }
@@ -68,7 +82,8 @@ case "${1:-}" in
     --watchdog)     MODE="watchdog"; shift ;;
     --doctor)       MODE="doctor";   shift ;;
     --install-unit) MODE="install";  shift ;;
-    --help|-h)      sed -n '2,52p' "$0" | sed 's/^# \?//'; exit 0 ;;
+    --help|-h)      awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' \
+                        "$SELF"; exit 0 ;;
     --)             shift ;;
 esac
 
@@ -260,7 +275,7 @@ if [[ "$MODE" == "install" ]]; then
         '' \
         '[Service]' \
         'Type=oneshot' \
-        "ExecStart=${HOST_HOME}/.local/bin/gamescale.sh --restore" \
+        "ExecStart=${SELF} --restore" \
         'SuccessExitStatus=0 1' \
         '' \
         '[Install]' \
@@ -334,6 +349,21 @@ if [[ "$MODE" == "doctor" ]]; then
         || bad "state dir not directly writable here (watchdog lock needs this)"
     [[ $CAN_WATCH == 1 ]] && ok "watchdog available (systemd-run + flock)" \
                           || bad "watchdog unavailable — trap-only, less resilient"
+    # Bare-name invocation from the Steam launch options box rides on an
+    # --env=PATH override, which REPLACES the sandbox PATH rather than
+    # extending it — so a Steam update that adds a directory would be dropped.
+    if [[ $IN_FLATPAK == 1 ]]; then
+        case ":$PATH:" in
+            *":${SELF%/*}:"*) ok "on the sandbox PATH — 'gamescale %command%' works" ;;
+            *) bad "${SELF%/*} not on sandbox PATH  →  needs --env=PATH=...:\$HOME/.local/bin" ;;
+        esac
+        for d in /app/bin /app/utils/bin /usr/bin; do
+            case ":$PATH:" in
+                *":$d:"*) ;;
+                *) bad "sandbox PATH lost $d — stale --env=PATH override, re-apply it" ;;
+            esac
+        done
+    fi
     if detect; then ok "detected $DET_CONNECTOR @ $DET_SCALE"
     else bad "detection failed"; fi
     state_exists && bad "stale state present — run --restore" || ok "no stale state"
@@ -399,7 +429,7 @@ if [[ "${GAMESCALE_NO_WATCH:-0}" != "1" && $CAN_WATCH == 1 ]]; then
     if exec 9>>"$LOCK_FILE" && flock -n -x 9; then
         if host systemd-run --user --collect --quiet \
                 --unit="gamescale-watchdog-$$" \
-                "${HOST_HOME}/.local/bin/gamescale.sh" --watchdog; then
+                "$SELF" --watchdog; then
             log "watchdog started"
         else
             warn "could not start watchdog; falling back to trap-only"
