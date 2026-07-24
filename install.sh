@@ -12,6 +12,11 @@
 # the login reconcile unit, and runs --doctor. Everything it does is printed and
 # individually reversible; nothing needs root.
 #
+# To remove all of it:
+#
+#   ./install.sh --uninstall
+#   curl -fsSL .../install.sh | sh -s -- --uninstall
+#
 # ENV
 #   GAMESCALE_REF          tag to install               (default: latest release)
 #   GAMESCALE_BINDIR       install location             (default: ~/.local/bin)
@@ -29,6 +34,81 @@ TARGET="$BINDIR/gamescale"
 say()  { printf '\033[1m::\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m!!\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31mxx\033[0m %s\n' "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Uninstall
+#
+# Flatpak's negation flags are a trap here. --nofilesystem, --no-talk-name and
+# --unset-env do not remove a grant, they record an explicit denial:
+#
+#   filesystems=!/home/you/.local/bin;    org.freedesktop.Flatpak=none
+#   unset-environment=PATH;               PATH=
+#
+# and that last pair is destructive — Steam's own PATH is set in its manifest,
+# so unsetting it doesn't restore the default, it wipes /app/bin and
+# /app/utils/bin and takes gamescope and MangoHud out with them.
+#
+# --reset is the only clean removal, and it removes EVERYTHING, including
+# grants that have nothing to do with gamescale. So reset only when the app's
+# overrides contain nothing but ours, and otherwise print exactly what to
+# remove and leave it alone.
+# ---------------------------------------------------------------------------
+
+if [ "${1:-}" = "--uninstall" ] || [ "${1:-}" = "-u" ]; then
+    say "removing gamescale"
+
+    # Before anything else: if a run died and left the display at 1x, this is
+    # the last moment the tool that knows how to undo that still exists.
+    if [ -x "$TARGET" ] && [ -e "$STATE_DIR/state" ]; then
+        say "stale state found — restoring your display first"
+        "$TARGET" --restore || warn "restore failed; check gdctl show"
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user disable --now gamescale-reconcile.service >/dev/null 2>&1 || true
+        rm -f "$HOME/.config/systemd/user/gamescale-reconcile.service"
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+        say "removed gamescale-reconcile.service"
+    fi
+
+    if command -v flatpak >/dev/null 2>&1 && flatpak info "$STEAM_ID" >/dev/null 2>&1; then
+        overrides=$(flatpak override --user --show "$STEAM_ID" 2>/dev/null || true)
+        # Every line we are responsible for. Anything else in there is the
+        # user's, and their overrides are not ours to delete.
+        foreign=$(printf '%s\n' "$overrides" \
+            | grep -v '^\[' \
+            | grep -v '^[[:space:]]*$' \
+            | grep -v '^filesystems=' \
+            | grep -v '^org\.freedesktop\.Flatpak=talk$' \
+            | grep -v '^PATH=' || true)
+        fs_foreign=$(printf '%s\n' "$overrides" \
+            | sed -n 's/^filesystems=//p' | tr ';' '\n' \
+            | grep -v '^[[:space:]]*$' \
+            | grep -v "^$BINDIR:ro$" \
+            | grep -v "^$STATE_DIR:create$" || true)
+
+        if [ -z "$foreign" ] && [ -z "$fs_foreign" ]; then
+            flatpak override --user --reset "$STEAM_ID"
+            say "removed Steam overrides"
+        else
+            warn "Steam has overrides that gamescale did not add:"
+            printf '%s\n' "$foreign" "$fs_foreign" | grep -v '^$' | sed 's/^/     /' >&2
+            warn "leaving them alone. To remove only gamescale's, edit:"
+            warn "  $HOME/.local/share/flatpak/overrides/$STEAM_ID"
+            warn "and drop $BINDIR, $STATE_DIR, org.freedesktop.Flatpak and the"
+            warn "trailing $BINDIR from PATH. Do NOT use --nofilesystem or"
+            warn "--unset-env: they add denials and wipe Steam's PATH."
+        fi
+    fi
+
+    rm -f "$TARGET"
+    say "removed $TARGET"
+    rm -rf "$STATE_DIR"
+    say "removed $STATE_DIR"
+    echo
+    say "gamescale is gone. Remove 'gamescale' from your Steam launch options."
+    exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Source. A checkout next to this installer wins, so cloning and running works

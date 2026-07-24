@@ -149,6 +149,23 @@ you to re-apply if not. Skip this grant if you'd rather paste the full path.
 
 Restart Steam after any of these.
 
+### Uninstall
+
+```sh
+./install.sh --uninstall            # or: curl -fsSL .../install.sh | sh -s -- --uninstall
+```
+
+Restores your display first if a run died and left it at 1×, then removes the
+binary, the state directory, the systemd unit, and the Steam overrides.
+
+It will **not** touch Steam overrides you added yourself. `flatpak override
+--reset` is the only clean removal and it removes everything, so if there's
+anything in there that isn't gamescale's, the uninstaller prints what to drop
+and leaves the file alone. Don't reach for `--nofilesystem` or `--unset-env` to
+do it by hand: those record explicit *denials* rather than removing a grant,
+and `--unset-env=PATH` wipes Steam's own `PATH` — `/app/bin` and
+`/app/utils/bin` disappear, taking gamescope and MangoHud with them.
+
 ### Login reconcile service
 
 Covers the case where the machine goes down mid-game:
