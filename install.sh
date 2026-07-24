@@ -91,8 +91,10 @@ TARGET="$BINDIR/gamescale"
 #   unset-environment=PATH;               PATH=
 #
 # and that last pair is destructive — Steam's own PATH is set in its manifest,
-# so unsetting it doesn't restore the default, it wipes /app/bin and
-# /app/utils/bin and takes gamescope and MangoHud out with them.
+# so unsetting it doesn't restore a default, it drops /app/bin (Steam's own
+# binaries) and /app/utils/bin (the Utility extension point). gamescope and
+# MangoHud are unaffected: Steam's launcher adds their Vulkan extension
+# directories itself at startup, independent of PATH.
 #
 # --reset is the only clean removal, and it removes EVERYTHING, including
 # grants that have nothing to do with gamescale. So reset only when the app's
