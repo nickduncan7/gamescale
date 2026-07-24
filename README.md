@@ -35,15 +35,56 @@ Fixing this by turning off fractional scaling permanently means a tiny desktop.
 So gamescale also scales your font and cursor by the inverse factor while the
 game runs — poor man's fractional scaling — and reverts both on exit.
 
+### Multiple monitors
+
+The XWayland factor is **global**. It only drops to 1 once *every* logical
+monitor is at 1.0 — scaling just the one you play on doesn't help, and is
+actively worse. Measured on a 2560×1600 panel at 133% with a second display
+attached, reading `Screen 0` from inside the Steam sandbox:
+
+| Configuration | Framebuffer | Factor | Cost vs native |
+|---|---|---|---|
+| both at 133% (no gamescale) | 3840×2400 | 2 | 2.25× |
+| primary 100%, secondary 133% | **5120×3200** | 2 | **4×** |
+| primary 133%, secondary 100% | 3840×2400 | 2 | 2.25× |
+| both at 100% | 2560×1600 | 1 | 1× |
+
+Row 2 is what gamescale did before v1.1.0: the factor stays at 2, but now
+multiplies a full-resolution logical size, so the game renders 78% *more*
+pixels than if you'd never run it. Since v1.1.0 every monitor is set to 1×
+together, and the whole layout — scales, positions, transforms, which display
+was primary — is saved and replayed on exit.
+
+### What about `xwayland-native-scaling`?
+
+GNOME 48+ ships an experimental feature aimed at this:
+
+```sh
+gsettings set org.gnome.mutter experimental-features "['xwayland-native-scaling']"
+```
+
+Tried on GNOME 50.3, 2560×1600 at 133%: still blurry. With fractional scaling
+on, the game appears to render at logical pixels and get upscaled — the same
+result as XWayland factor `1`, reached by a different route. That's an
+observation, not a mechanism; the pixels were visibly soft and 1× scaling
+looked better.
+
+If it works on your hardware, use it — it would be a better fix than this repo.
+Please open an issue saying so.
+
 ## What it does not do
 
 - **Not a gamescope replacement.** No nested compositor, no upscaling, no
   frame limiting. It changes one display setting and changes it back.
-- **Not per-application.** The scope is *temporal*, not spatial. While the game
-  runs, your whole desktop is at 1×. Alt-tabbing shows a smaller desktop with
-  compensated text — better than raw 1×, not identical to your normal setup.
+- **Not per-application, and not per-monitor.** The scope is *temporal*, not
+  spatial. While the game runs, *every* display is at 1× — it has to be, see
+  below. Alt-tabbing shows a smaller desktop with compensated text — better
+  than raw 1×, not identical to your normal setup.
 - **Doesn't fix title bars, icons, or panel spacing.** Only text and cursor
   scale. GNOME has no knob for the rest.
+- **Can't help a game that ignores what it's told.** Some games won't offer
+  your panel's native mode no matter what the desktop reports. This changes
+  what XWayland says; a game still has to listen.
 
 ---
 
@@ -154,7 +195,7 @@ gamescale -- /path/to/game
 
 | | |
 |---|---|
-| `--status` | detected connector, scale, font/cursor, stale state |
+| `--status` | detected monitors and scales, font/cursor, stale state |
 | `--doctor` | full dependency and permission check |
 | `--restore` | put the display back from a stranded state file |
 | `--install-unit` | install the login reconcile service |
@@ -165,7 +206,7 @@ gamescale -- /path/to/game
 | | |
 |---|---|
 | `GAMESCALE_SCALE` | scale while playing (default `1`) |
-| `GAMESCALE_MONITOR` | connector override, e.g. `eDP-1` (default: auto-detect) |
+| `GAMESCALE_MONITOR` | ignored since v1.1.0 — every monitor has to reach 1× |
 | `GAMESCALE_NO_FONT` | `1` to skip font/cursor compensation |
 | `GAMESCALE_NO_WATCH` | `1` to skip the host watchdog (trap only) |
 | `GAMESCALE_DEBUG` | `1` for verbose logging |
@@ -220,7 +261,20 @@ so the watchdog, the login unit, and your shell all see the same file.
   rejection on the restore path — the one failure you'd least want.
 - Detection prefers `gdctl show` (live state), falling back to
   `monitors.xml` (saved config) for setups that have never opened the Displays
-  panel. Multi-monitor configs use the logical monitor marked primary.
+  panel. Every logical monitor is captured, not just the primary one.
+- `gdctl set` **replaces** the whole configuration — a monitor left out of the
+  command is a monitor switched off. So every generated config lists every
+  monitor, and is checked with `gdctl set --verify` before being applied. If
+  verification fails, the game launches unmodified rather than gambling with
+  your display arrangement.
+- Restoring replays exact saved coordinates. Applying can't: at 1× each logical
+  monitor grows, so the old coordinates would overlap and be rejected. It
+  rebuilds the arrangement relationally (`--right-of` / `--below`) in the
+  original left-to-right or top-to-bottom order and lets mutter do the layout.
+- If a display is unplugged mid-game, the saved layout no longer applies. The
+  restore path falls back to replaying only the monitors still connected,
+  promoting a new primary if that one went away — a state file that can never
+  be applied would mean a desktop permanently stuck at 1×.
 - If anything is unavailable, the game still launches, unmodified. A failed
   scale flip should never mean a failed game launch.
 - The state file is written to a sibling and renamed, so a reader sees the
@@ -240,6 +294,18 @@ so the watchdog, the login unit, and your shell all see the same file.
 The script running without errors and the game getting the right resolution are
 different claims. Check the game's own video settings — the display resolution
 should read your panel's native mode, not the overscaled one.
+
+For a claim that doesn't depend on a game's settings dialog, ask XWayland
+directly from inside the Steam sandbox, which is exactly the one a game sees:
+
+```sh
+flatpak run --command=xrandr com.valvesoftware.Steam | grep '^Screen'
+```
+
+On a 2560×1600 panel at 133% this reports `current 3840 x 2400` — the
+overscaled framebuffer. Under `gamescale` it should read `2560 x 1600`. This is
+also the quickest way to check whether the problem in this README is one you
+actually have.
 
 Then test the lock, because it's the load-bearing part. While a game is
 running:
