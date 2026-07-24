@@ -47,7 +47,8 @@
 #
 # ENV
 #   GAMESCALE_SCALE     scale while playing        (default: 1)
-#   GAMESCALE_MONITOR   connector override         (default: auto-detect)
+#   GAMESCALE_MONITOR   ignored since v1.1.0 — every monitor must reach 1x
+#                       before XWayland's global scale factor drops
 #   GAMESCALE_NO_FONT   1 to skip font/cursor compensation
 #   GAMESCALE_NO_WATCH  1 to skip the host watchdog (trap only)
 #   GAMESCALE_DEBUG     1 for verbose logging
@@ -138,50 +139,105 @@ feq()    { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a - b < 1e-9 && b - a < 1e-9)
 # Detection — parses the "Logical monitors:" section of `gdctl show`:
 #
 #   Logical monitors:
-#   └──Logical monitor #1
-#      ├──Position: (0, 0)
-#      ├──Scale: 1.3333333730697632
-#      ├──Primary: yes
-#      └──Monitors: (1)
-#          └──eDP-1 (Built-in display)
+#   ├──Logical monitor #1
+#   │  ├──Position: (1920, 0)
+#   │  ├──Scale: 1.3333333730697632
+#   │  ├──Transform: normal
+#   │  ├──Primary: no
+#   │  └──Monitors: (1)
+#   │      └──HDMI-1 (RTK 16")
+#   └──Logical monitor #2
+#      ...
 #
-# The scale is a full-precision double and is stored and replayed verbatim, so
-# gdctl accepts it as a supported value on restore.
+# EVERY logical monitor is captured, not just the primary one, because the
+# XWayland scale factor is global: it only drops to 1 when every monitor is at
+# 1.0. Scaling the primary alone leaves the factor at 2 and applies it to a
+# full-resolution logical size, which costs MORE pixels than doing nothing
+# (measured: 5120x3200 vs 3840x2400 on a 2560x1600 panel).
+#
+# gdctl set replaces the whole configuration, so a monitor left out of the
+# command is a monitor switched off. Everything detected here must be replayed.
+#
+# Scales are full-precision doubles, stored and replayed verbatim, so gdctl
+# accepts them as supported values on restore.
 # ---------------------------------------------------------------------------
 
-detect_from_gdctl() {
-    local out parsed
-    out=$(host gdctl show 2>/dev/null) || return 1
+# Parallel arrays, one entry per logical monitor. MON_CONNS holds a
+# comma-separated list because a mirrored logical monitor drives several.
+MON_CONNS=(); MON_SCALE=(); MON_PRIM=(); MON_X=(); MON_Y=(); MON_TRANSFORM=()
 
-    parsed=$(awk '
+parse_gdctl_show() {
+    awk '
         /^Logical monitors:/ { section = 1; next }
         !section { next }
-        /Logical monitor #/ { n++; in_monitors = 0; next }
-        !n { next }
-        /Scale:/    { if (match($0, /[0-9]+\.?[0-9]*/))
-                          scale[n] = substr($0, RSTART, RLENGTH)
-                      next }
-        /Primary:/  { if ($0 ~ /yes/) primary = n; next }
-        /Monitors:/ { in_monitors = 1; next }
-        in_monitors && conn[n] == "" {
-            if (match($0, /[A-Za-z]+[-_][0-9]+/))
-                conn[n] = substr($0, RSTART, RLENGTH)
+        # A new unindented "Word:" heading ends the section.
+        /^[A-Za-z][A-Za-z ]*:/ { section = 0; next }
+        /Logical monitor #/ {
+            if (n) print rec(n)
+            n++; in_monitors = 0
+            conns[n] = ""; scale[n] = 1; prim[n] = "no"
+            x[n] = 0; y[n] = 0; transform[n] = "normal"
             next
         }
-        END {
-            pick = primary ? primary : 1
-            if (conn[pick] == "") exit 1
-            print conn[pick] "\t" (scale[pick] == "" ? 1 : scale[pick])
+        !n { next }
+        /Position:/  { if (match($0, /\(-?[0-9]+, *-?[0-9]+\)/)) {
+                           pos = substr($0, RSTART + 1, RLENGTH - 2)
+                           sub(/, */, " ", pos)
+                           split(pos, p, " ")
+                           x[n] = p[1]; y[n] = p[2]
+                       }
+                       next }
+        /Scale:/     { if (match($0, /[0-9]+\.?[0-9]*/))
+                           scale[n] = substr($0, RSTART, RLENGTH)
+                       next }
+        /Transform:/ { if (match($0, /(normal|flipped-?[0-9]*|90|180|270)/))
+                           transform[n] = substr($0, RSTART, RLENGTH)
+                       next }
+        /Primary:/   { if ($0 ~ /yes/) prim[n] = "yes"; next }
+        /Monitors:/  { in_monitors = 1; next }
+        in_monitors {
+            # The connector is the first token after the box glyphs:
+            # "    └──HDMI-A-1 (Dell U2723QE)". Strip the glyphs and anchor,
+            # rather than searching mid-string — an unanchored search for
+            # name-dash-digits finds "A-1" inside "HDMI-A-1", which gdctl then
+            # rejects as an unknown monitor.
+            line = $0
+            sub(/^[^A-Za-z0-9]*/, "", line)
+            if (match(line, /^[A-Za-z][A-Za-z0-9]*([-_][A-Za-z0-9]+)+/)) {
+                c = substr(line, RSTART, RLENGTH)
+                conns[n] = (conns[n] == "") ? c : conns[n] "," c
+            }
+            next
         }
-    ' <<<"$out") || return 1
-
-    DET_CONNECTOR="${parsed%%$'\t'*}"
-    DET_SCALE="${parsed##*$'\t'}"
-    [[ -n "$DET_CONNECTOR" && -n "$DET_SCALE" ]] || return 1
-    log "gdctl: $DET_CONNECTOR @ $DET_SCALE"
+        function rec(i) {
+            return conns[i] "\t" scale[i] "\t" prim[i] "\t" \
+                   x[i] "\t" y[i] "\t" transform[i]
+        }
+        END { if (n && conns[n] != "") print rec(n) }
+    '
 }
 
-# Fallback: saved config rather than live state.
+detect_from_gdctl() {
+    local out line
+    out=$(host gdctl show 2>/dev/null) || return 1
+
+    MON_CONNS=(); MON_SCALE=(); MON_PRIM=(); MON_X=(); MON_Y=(); MON_TRANSFORM=()
+    while IFS=$'\t' read -r conns scale prim x y transform; do
+        [[ -n "$conns" ]] || continue
+        MON_CONNS+=("$conns");   MON_SCALE+=("$scale")
+        MON_PRIM+=("$prim");     MON_X+=("$x")
+        MON_Y+=("$y");           MON_TRANSFORM+=("$transform")
+    done < <(parse_gdctl_show <<<"$out")
+
+    [[ ${#MON_CONNS[@]} -gt 0 ]] || return 1
+    for ((i = 0; i < ${#MON_CONNS[@]}; i++)); do
+        log "gdctl: ${MON_CONNS[i]} @ ${MON_SCALE[i]} (${MON_X[i]},${MON_Y[i]}) primary=${MON_PRIM[i]}"
+    done
+}
+
+# Fallback: saved config rather than live state. Single monitor only — if
+# gdctl is unavailable we have no reliable way to replay a layout, and a
+# half-replayed layout is worse than declining to touch it.
 detect_from_xml() {
     local xml="${HOST_HOME}/.config/monitors.xml" connector scale
     host test -r "$xml" || return 1
@@ -204,25 +260,109 @@ detect_from_xml() {
     fi
 
     [[ -n "$connector" && -n "$scale" ]] || return 1
-    DET_CONNECTOR="$connector"
-    DET_SCALE="$scale"
-    log "monitors.xml: $DET_CONNECTOR @ $DET_SCALE"
+    MON_CONNS=("$connector"); MON_SCALE=("$scale"); MON_PRIM=("yes")
+    MON_X=(0); MON_Y=(0); MON_TRANSFORM=("normal")
+    log "monitors.xml: $connector @ $scale"
 }
 
 detect() {
-    DET_CONNECTOR=""; DET_SCALE=""
     detect_from_gdctl || detect_from_xml || return 1
-    [[ -n "${GAMESCALE_MONITOR:-}" ]] && DET_CONNECTOR="$GAMESCALE_MONITOR"
+    if [[ -n "${GAMESCALE_MONITOR:-}" ]]; then
+        warn "GAMESCALE_MONITOR is ignored since v1.1.0 — every monitor has to"
+        warn "reach 1x before XWayland's global scale factor drops"
+    fi
     return 0
+}
+
+# The primary monitor's scale drives the font/cursor compensation, since that's
+# the display you'll be reading the desktop on.
+primary_index() {
+    local i
+    for ((i = 0; i < ${#MON_PRIM[@]}; i++)); do
+        [[ "${MON_PRIM[i]}" == "yes" ]] && { echo "$i"; return 0; }
+    done
+    echo 0
+}
+
+# Monitors sharing an x coordinate are stacked vertically; anything else is
+# treated as a horizontal row. Determines which gdctl relation to rebuild the
+# layout with.
+layout_axis() {
+    local i first_x="${MON_X[0]}"
+    for ((i = 1; i < ${#MON_X[@]}; i++)); do
+        [[ "${MON_X[i]}" == "$first_x" ]] || { echo x; return; }
+    done
+    echo y
+}
+
+# Indices ordered along that axis. Used to rebuild the layout relationally when
+# applying, since absolute coordinates stop being valid the moment the scales
+# change: at 1x each logical monitor grows, and the old coordinates overlap.
+layout_order() {
+    local i axis="$1"
+    for ((i = 0; i < ${#MON_CONNS[@]}; i++)); do
+        if [[ "$axis" == "x" ]]; then echo "${MON_X[i]} $i"; else echo "${MON_Y[i]} $i"; fi
+    done | sort -n | awk '{ print $2 }'
 }
 
 # ---------------------------------------------------------------------------
 # Settings access
 # ---------------------------------------------------------------------------
 
-set_scale()   { host gdctl set --logical-monitor --primary --monitor "$1" --scale "$2"; }
 get_setting() { host gsettings get "$IFACE_SCHEMA" "$1" 2>/dev/null | tr -d "'"; }
 set_setting() { host gsettings set "$IFACE_SCHEMA" "$1" "$2"; }
+
+# Builds a complete gdctl argument list into GDCTL_ARGS from the MON_* arrays.
+# Complete is the operative word: gdctl set replaces the entire configuration,
+# so any monitor omitted here is a monitor switched off.
+#
+#   build_config absolute        replay saved scales at saved coordinates
+#   build_config relational SCALE put every monitor at SCALE, let mutter place
+#
+# Absolute is for restore, where the coordinates are known good. Relational is
+# for apply, where they aren't: at 1x every logical monitor grows, so the saved
+# coordinates would overlap and mutter would reject the config.
+build_config() {
+    local mode="$1" forced_scale="${2:-}" i conn scale axis prev=""
+    GDCTL_ARGS=()
+
+    local -a order=()
+    if [[ "$mode" == "relational" ]]; then
+        axis=$(layout_axis)
+        mapfile -t order < <(layout_order "$axis")
+    else
+        for ((i = 0; i < ${#MON_CONNS[@]}; i++)); do order+=("$i"); done
+    fi
+
+    for i in "${order[@]}"; do
+        scale="${forced_scale:-${MON_SCALE[i]}}"
+        GDCTL_ARGS+=(--logical-monitor)
+        [[ "${MON_PRIM[i]}" == "yes" ]] && GDCTL_ARGS+=(--primary)
+        # A mirrored logical monitor drives several connectors at once.
+        local IFS=,
+        for conn in ${MON_CONNS[i]}; do GDCTL_ARGS+=(--monitor "$conn"); done
+        unset IFS
+        GDCTL_ARGS+=(--scale "$scale" --transform "${MON_TRANSFORM[i]}")
+
+        if [[ "$mode" == "absolute" ]]; then
+            GDCTL_ARGS+=(--x "${MON_X[i]}" --y "${MON_Y[i]}")
+        elif [[ -z "$prev" ]]; then
+            GDCTL_ARGS+=(--x 0 --y 0)
+        elif [[ "$axis" == "x" ]]; then
+            GDCTL_ARGS+=(--right-of "$prev")
+        else
+            GDCTL_ARGS+=(--below "$prev")
+        fi
+        prev="${MON_CONNS[i]%%,*}"
+    done
+}
+
+# gdctl --verify checks a configuration without applying it, which turns "we
+# might strand your display layout" into a question we can answer beforehand.
+apply_config() {
+    host gdctl set --verify "${GDCTL_ARGS[@]}" 2>/dev/null || return 2
+    host gdctl set "${GDCTL_ARGS[@]}"
+}
 
 # ---------------------------------------------------------------------------
 # State, written through the portal so it lands on the host filesystem where
@@ -237,11 +377,17 @@ set_setting() { host gsettings set "$IFACE_SCHEMA" "$1" "$2"; }
 # gdctl rejects the bad value, every restore layer fails identically, and the
 # retry logic then keeps you stranded at 1x instead of recovering.
 state_write() {
+    local text_scale="$1" cursor_size="$2" i
     host mkdir -p "$STATE_DIR" 2>/dev/null
-    printf 'connector=%s\nscale=%s\ntext_scale=%s\ncursor_size=%s\n' \
-        "$1" "$2" "$3" "$4" \
-        | host sh -c "umask 077; cat > '$STATE_FILE.new' \
-                      && mv -f '$STATE_FILE.new' '$STATE_FILE'"
+    {
+        printf 'version=2\ntext_scale=%s\ncursor_size=%s\n' "$text_scale" "$cursor_size"
+        for ((i = 0; i < ${#MON_CONNS[@]}; i++)); do
+            printf 'monitor=%s;%s;%s;%s;%s;%s\n' \
+                "${MON_CONNS[i]}" "${MON_SCALE[i]}" "${MON_PRIM[i]}" \
+                "${MON_X[i]}" "${MON_Y[i]}" "${MON_TRANSFORM[i]}"
+        done
+    } | host sh -c "umask 077; cat > '$STATE_FILE.new' \
+                    && mv -f '$STATE_FILE.new' '$STATE_FILE'"
 }
 
 state_read()   { host cat "$STATE_FILE" 2>/dev/null; }
@@ -263,10 +409,37 @@ is_connector() { [[ "$1" =~ ^[A-Za-z0-9]+([-_][A-Za-z0-9]+)*$ ]]; }
 #
 # Assigns into the caller's locals (bash dynamic scope); leaves them untouched
 # on failure.
+#
+# One `monitor=` line per logical monitor:
+#   monitor=<connectors>;<scale>;<primary>;<x>;<y>;<transform>
+# with connectors comma-separated for a mirrored logical monitor.
+parse_monitor_record() {
+    local -a f conns
+    local conn
+    IFS=';' read -ra f <<<"$1"
+    [[ ${#f[@]} -eq 6 ]] || return 1
+
+    IFS=',' read -ra conns <<<"${f[0]}"
+    [[ ${#conns[@]} -gt 0 ]] || return 1
+    for conn in "${conns[@]}"; do is_connector "$conn" || return 1; done
+
+    is_number "${f[1]}" || return 1
+    [[ "${f[2]}" == "yes" || "${f[2]}" == "no" ]] || return 1
+    [[ "${f[3]}" =~ ^-?[0-9]+$ && "${f[4]}" =~ ^-?[0-9]+$ ]] || return 1
+    [[ "${f[5]}" =~ ^(normal|90|180|270|flipped|flipped-90|flipped-180|flipped-270)$ ]] || return 1
+
+    MON_CONNS+=("${f[0]}");  MON_SCALE+=("${f[1]}")
+    MON_PRIM+=("${f[2]}");   MON_X+=("${f[3]}")
+    MON_Y+=("${f[4]}");      MON_TRANSFORM+=("${f[5]}")
+}
+
 state_parse() {
-    local blob line key value
+    local blob line key value v1_conn="" v1_scale=""
     blob=$(state_read) || return 1
     [[ -n "$blob" ]] || return 1
+
+    MON_CONNS=(); MON_SCALE=(); MON_PRIM=(); MON_X=(); MON_Y=(); MON_TRANSFORM=()
+    text_scale=""; cursor_size=""
 
     while IFS= read -r line; do
         [[ -n "$line" ]] || continue
@@ -274,21 +447,61 @@ state_parse() {
         value="${line#*=}"
         [[ "$key" != "$line" ]] || return 1
         case "$key" in
-            connector)   is_connector "$value" && connector="$value"   || return 1 ;;
-            scale)       is_number    "$value" && scale="$value"       || return 1 ;;
+            version)     [[ "$value" == "2" ]] || return 1 ;;
+            monitor)     parse_monitor_record "$value" || return 1 ;;
             text_scale)  is_number    "$value" && text_scale="$value"  || return 1 ;;
             cursor_size) is_integer   "$value" && cursor_size="$value" || return 1 ;;
+            # v1 (1.0.1 and earlier): one primary monitor, no layout. Read so
+            # that upgrading mid-game still restores rather than stranding you.
+            connector)   is_connector "$value" && v1_conn="$value"     || return 1 ;;
+            scale)       is_number    "$value" && v1_scale="$value"    || return 1 ;;
             *) return 1 ;;
         esac
     done <<<"$blob"
 
-    [[ -n "$connector" && -n "$scale" ]]
+    if [[ -n "$v1_conn" ]]; then
+        [[ ${#MON_CONNS[@]} -eq 0 && -n "$v1_scale" ]] || return 1
+        MON_CONNS=("$v1_conn"); MON_SCALE=("$v1_scale"); MON_PRIM=("yes")
+        MON_X=(0); MON_Y=(0); MON_TRANSFORM=("normal")
+    fi
+
+    [[ ${#MON_CONNS[@]} -gt 0 ]]
 }
 
 # Idempotent: safe to call from the trap, the watchdog, and the login unit,
 # in any order or all at once. First one to finish clears the state.
+# Drops saved monitors that aren't currently connected and lets mutter place
+# what's left. Unplugging a display while the game runs would otherwise make
+# the saved layout unreplayable, and a state file that can never be applied is
+# a desktop permanently stuck at 1x.
+restore_survivors() {
+    local -a s_conns=("${MON_CONNS[@]}")     s_scale=("${MON_SCALE[@]}") \
+             s_prim=("${MON_PRIM[@]}")       s_x=("${MON_X[@]}") \
+             s_y=("${MON_Y[@]}")             s_tr=("${MON_TRANSFORM[@]}")
+    local present i first has_primary=0
+
+    detect_from_gdctl || return 1
+    present=" ${MON_CONNS[*]//,/ } "
+
+    MON_CONNS=(); MON_SCALE=(); MON_PRIM=(); MON_X=(); MON_Y=(); MON_TRANSFORM=()
+    for ((i = 0; i < ${#s_conns[@]}; i++)); do
+        first="${s_conns[i]%%,*}"
+        [[ "$present" == *" $first "* ]] || { log "dropping absent $first"; continue; }
+        MON_CONNS+=("${s_conns[i]}"); MON_SCALE+=("${s_scale[i]}")
+        MON_PRIM+=("${s_prim[i]}");   MON_X+=("${s_x[i]}")
+        MON_Y+=("${s_y[i]}");         MON_TRANSFORM+=("${s_tr[i]}")
+        [[ "${s_prim[i]}" == "yes" ]] && has_primary=1
+    done
+
+    [[ ${#MON_CONNS[@]} -gt 0 ]] || return 1
+    [[ $has_primary == 1 ]] || MON_PRIM[0]="yes"
+
+    build_config relational ""
+    apply_config
+}
+
 restore_now() {
-    local connector="" scale="" text_scale="" cursor_size=""
+    local text_scale="" cursor_size=""
     state_exists || return 1
     if ! state_parse; then
         warn "state at $STATE_FILE is malformed — refusing to replay it"
@@ -297,13 +510,27 @@ restore_now() {
         return 1
     fi
 
-    log "restoring $connector @ $scale (text $text_scale, cursor $cursor_size)"
-    if ! set_scale "$connector" "$scale"; then
-        warn "FAILED to restore scale $scale on $connector — state kept for retry"
+    log "restoring ${#MON_CONNS[@]} monitor(s) (text $text_scale, cursor $cursor_size)"
+    build_config absolute
+    if ! apply_config; then
+        log "saved layout was rejected; retrying with connected monitors only"
+        if ! restore_survivors; then
+            warn "FAILED to restore display configuration — state kept for retry"
+            return 1
+        fi
+    fi
+    # Clearing state after a partial restore is how a compensated font size
+    # becomes the next run's "original": the scale comes back, the font
+    # silently doesn't, the state file is deleted, and nothing remembers what
+    # the pristine value was. Keep the state and let another layer retry.
+    local failed=0
+    [[ -n "$text_scale"  ]] && { set_setting text-scaling-factor "$text_scale" || failed=1; }
+    [[ -n "$cursor_size" ]] && { set_setting cursor-size "$cursor_size"        || failed=1; }
+    if [[ $failed == 1 ]]; then
+        warn "restored scale but not font/cursor — state kept for retry"
         return 1
     fi
-    [[ -n "$text_scale"  ]] && set_setting text-scaling-factor "$text_scale"
-    [[ -n "$cursor_size" ]] && set_setting cursor-size "$cursor_size"
+
     state_clear
     return 0
 }
@@ -412,8 +639,24 @@ if [[ "$MODE" == "doctor" ]]; then
             esac
         done
     fi
-    if detect; then ok "detected $DET_CONNECTOR @ $DET_SCALE"
-    else bad "detection failed"; fi
+    if detect; then
+        for ((i = 0; i < ${#MON_CONNS[@]}; i++)); do
+            ok "detected ${MON_CONNS[i]} @ ${MON_SCALE[i]}$([[ ${MON_PRIM[i]} == yes ]] && echo ' (primary)')"
+        done
+        # Every monitor has to reach 1x before XWayland's global integer factor
+        # drops, so a second display is not a detail we can ignore.
+        if [[ ${#MON_CONNS[@]} -gt 1 ]]; then
+            build_config relational "$GAME_SCALE"
+            if host gdctl set --verify "${GDCTL_ARGS[@]}" 2>/dev/null; then
+                ok "${#MON_CONNS[@]} monitors — the ${GAME_SCALE}x layout verifies"
+            else
+                bad "${#MON_CONNS[@]} monitors — gdctl rejects the ${GAME_SCALE}x layout;"
+                bad "  games will launch unmodified rather than risk your layout"
+            fi
+        fi
+    else
+        bad "detection failed"
+    fi
     state_exists && bad "stale state present — run --restore" || ok "no stale state"
     exit 0
 fi
@@ -432,10 +675,14 @@ if [[ "$MODE" == "status" ]]; then
     echo "watchdog:     $([[ $CAN_WATCH == 1 ]] && echo available || echo UNAVAILABLE)"
     echo "state dir:    $STATE_DIR"
     if detect; then
-        echo "connector:    $DET_CONNECTOR"
-        echo "scale:        $DET_SCALE"
+        for ((i = 0; i < ${#MON_CONNS[@]}; i++)); do
+            printf 'monitor:      %-12s scale %-20s %s%s\n' \
+                "${MON_CONNS[i]}" "${MON_SCALE[i]}" \
+                "at (${MON_X[i]},${MON_Y[i]})" \
+                "$([[ ${MON_PRIM[i]} == yes ]] && echo ' primary')"
+        done
     else
-        echo "connector:    DETECTION FAILED"; exit 1
+        echo "monitor:      DETECTION FAILED"; exit 1
     fi
     echo "text scaling: $(get_setting text-scaling-factor)"
     echo "cursor size:  $(get_setting cursor-size)"
@@ -458,16 +705,27 @@ fi
 
 detect || give_up "could not determine monitor/scale" "$@"
 
-if feq "$DET_SCALE" "$GAME_SCALE"; then
-    log "already at $GAME_SCALE, nothing to do"
+# XWayland's scale factor is global: it only drops to 1 once EVERY logical
+# monitor is at 1x. Leaving one at a fractional scale keeps the factor at 2 and
+# then applies it to a full-resolution logical size, which costs more pixels
+# than never having run — so "already done" means all of them, not just the one
+# you play on.
+ALREADY=1
+for scale in "${MON_SCALE[@]}"; do
+    feq "$scale" "$GAME_SCALE" || { ALREADY=0; break; }
+done
+if [[ $ALREADY == 1 ]]; then
+    log "every monitor already at $GAME_SCALE, nothing to do"
     exec "$@"
 fi
 
+PRIMARY=$(primary_index)
+ORIG_SCALE="${MON_SCALE[PRIMARY]}"
 ORIG_TEXT_SCALE=$(get_setting text-scaling-factor); : "${ORIG_TEXT_SCALE:=1.0}"
 ORIG_CURSOR_SIZE=$(get_setting cursor-size);        : "${ORIG_CURSOR_SIZE:=24}"
 
 host mkdir -p "$STATE_DIR" 2>/dev/null
-state_write "$DET_CONNECTOR" "$DET_SCALE" "$ORIG_TEXT_SCALE" "$ORIG_CURSOR_SIZE"
+state_write "$ORIG_TEXT_SCALE" "$ORIG_CURSOR_SIZE"
 
 # Layer 2. Take the lock BEFORE starting the watchdog, so there's no window
 # where the watchdog could acquire it and restore immediately. FD 9 is
@@ -494,17 +752,24 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if ! set_scale "$DET_CONNECTOR" "$GAME_SCALE"; then
-    warn "could not set scale on $DET_CONNECTOR"
+build_config relational "$GAME_SCALE"
+apply_config; APPLY_RC=$?
+if [[ $APPLY_RC -ne 0 ]]; then
+    if [[ $APPLY_RC == 2 ]]; then
+        warn "gdctl rejected the ${GAME_SCALE}x layout for ${#MON_CONNS[@]} monitor(s);"
+        warn "launching unmodified rather than risking your display arrangement"
+    else
+        warn "could not apply the ${GAME_SCALE}x layout"
+    fi
     state_clear
     exec "$@"
 fi
 
-# Poor man's fractional scaling: the desktop just lost DET_SCALE worth of
-# apparent size, so scale text and cursor to match. Title bars and icons won't
-# follow — that's a GNOME limitation, not a bug here.
+# Poor man's fractional scaling: the desktop just lost the primary monitor's
+# scale worth of apparent size, so scale text and cursor to match. Title bars
+# and icons won't follow — that's a GNOME limitation, not a bug here.
 if [[ "${GAMESCALE_NO_FONT:-0}" != "1" ]]; then
-    RATIO=$(fdiv "$DET_SCALE" "$GAME_SCALE")
+    RATIO=$(fdiv "$ORIG_SCALE" "$GAME_SCALE")
     set_setting text-scaling-factor "$(fmul "$ORIG_TEXT_SCALE" "$RATIO")"
     set_setting cursor-size "$(fround "$(fmul "$ORIG_CURSOR_SIZE" "$RATIO")")"
     log "compensated ${RATIO}x"
