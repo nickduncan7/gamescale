@@ -17,6 +17,9 @@
 #   ./install.sh --uninstall
 #   curl -fsSL .../install.sh | sh -s -- --uninstall
 #
+# Add --dry-run to either to see every action without taking any. Worth doing
+# before the install: it grants a sandbox you care about four permissions.
+#
 # ENV
 #   GAMESCALE_REF          tag to install               (default: latest release)
 #   GAMESCALE_BINDIR       install location             (default: ~/.local/bin)
@@ -27,13 +30,56 @@ set -eu
 
 REPO="proto-cool/gamescale"
 STEAM_ID="com.valvesoftware.Steam"
-BINDIR="${GAMESCALE_BINDIR:-$HOME/.local/bin}"
 STATE_DIR="$HOME/.local/state/gamescale"
-TARGET="$BINDIR/gamescale"
+
+MODE="install"; DRY=0
+for arg in "$@"; do
+    case "$arg" in
+        --uninstall|-u) MODE="uninstall" ;;
+        --dry-run|-n)   DRY=1 ;;
+        --help|-h)      sed -n '2,30p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *)              printf 'unknown option: %s\n' "$arg" >&2; exit 2 ;;
+    esac
+done
 
 say()  { printf '\033[1m::\033[0m %s\n' "$*"; }
+# Confirmation of something that actually happened — silent during a dry run,
+# where act() has already printed what would have happened.
+note() { [ "$DRY" = 1 ] || say "$@"; }
 warn() { printf '\033[33m!!\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31mxx\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Every mutation goes through this, so --dry-run can't miss one.
+act() {
+    if [ "$DRY" = 1 ]; then printf '\033[36m--\033[0m would: %s\n' "$*"; return 0; fi
+    "$@"
+}
+
+# Where the binary lives. Uninstall has to find an install that used a custom
+# GAMESCALE_BINDIR without being told again, so look for it rather than
+# assuming: the variable, then PATH, then the read-only grant we gave Steam,
+# then the default.
+find_bindir() {
+    if [ -n "${GAMESCALE_BINDIR:-}" ]; then printf '%s' "$GAMESCALE_BINDIR"; return; fi
+
+    found=$(command -v gamescale 2>/dev/null || true)
+    if [ -n "$found" ]; then dirname "$found"; return; fi
+
+    if command -v flatpak >/dev/null 2>&1; then
+        granted=$(flatpak override --user --show "$STEAM_ID" 2>/dev/null \
+            | sed -n 's/^filesystems=//p' | tr ';' '\n' \
+            | sed -n 's/:ro$//p' | head -n 1)
+        if [ -n "$granted" ] && [ -e "$granted/gamescale" ]; then
+            printf '%s' "$granted"; return
+        fi
+    fi
+
+    printf '%s' "$HOME/.local/bin"
+}
+
+BINDIR=$(find_bindir)
+TARGET="$BINDIR/gamescale"
+[ "$DRY" = 1 ] && say "dry run — nothing will be changed"
 
 # ---------------------------------------------------------------------------
 # Uninstall
@@ -54,21 +100,25 @@ die()  { printf '\033[31mxx\033[0m %s\n' "$*" >&2; exit 1; }
 # remove and leave it alone.
 # ---------------------------------------------------------------------------
 
-if [ "${1:-}" = "--uninstall" ] || [ "${1:-}" = "-u" ]; then
-    say "removing gamescale"
+if [ "$MODE" = "uninstall" ]; then
+    say "removing gamescale ($TARGET)"
 
     # Before anything else: if a run died and left the display at 1x, this is
     # the last moment the tool that knows how to undo that still exists.
     if [ -x "$TARGET" ] && [ -e "$STATE_DIR/state" ]; then
         say "stale state found — restoring your display first"
-        "$TARGET" --restore || warn "restore failed; check gdctl show"
+        act "$TARGET" --restore || warn "restore failed; check gdctl show"
     fi
 
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl --user disable --now gamescale-reconcile.service >/dev/null 2>&1 || true
-        rm -f "$HOME/.config/systemd/user/gamescale-reconcile.service"
-        systemctl --user daemon-reload >/dev/null 2>&1 || true
-        say "removed gamescale-reconcile.service"
+        if [ "$DRY" = 1 ]; then
+            act systemctl --user disable --now gamescale-reconcile.service
+        else
+            systemctl --user disable --now gamescale-reconcile.service >/dev/null 2>&1 || true
+        fi
+        act rm -f "$HOME/.config/systemd/user/gamescale-reconcile.service"
+        [ "$DRY" = 1 ] || systemctl --user daemon-reload >/dev/null 2>&1 || true
+        note "removed gamescale-reconcile.service"
     fi
 
     if command -v flatpak >/dev/null 2>&1 && flatpak info "$STEAM_ID" >/dev/null 2>&1; then
@@ -88,8 +138,8 @@ if [ "${1:-}" = "--uninstall" ] || [ "${1:-}" = "-u" ]; then
             | grep -v "^$STATE_DIR:create$" || true)
 
         if [ -z "$foreign" ] && [ -z "$fs_foreign" ]; then
-            flatpak override --user --reset "$STEAM_ID"
-            say "removed Steam overrides"
+            act flatpak override --user --reset "$STEAM_ID"
+            note "removed Steam overrides"
         else
             warn "Steam has overrides that gamescale did not add:"
             printf '%s\n' "$foreign" "$fs_foreign" | grep -v '^$' | sed 's/^/     /' >&2
@@ -101,12 +151,16 @@ if [ "${1:-}" = "--uninstall" ] || [ "${1:-}" = "-u" ]; then
         fi
     fi
 
-    rm -f "$TARGET"
-    say "removed $TARGET"
-    rm -rf "$STATE_DIR"
-    say "removed $STATE_DIR"
+    act rm -f "$TARGET"
+    note "removed $TARGET"
+    act rm -rf "$STATE_DIR"
+    note "removed $STATE_DIR"
     echo
-    say "gamescale is gone. Remove 'gamescale' from your Steam launch options."
+    if [ "$DRY" = 1 ]; then
+        say "dry run finished — nothing was changed"
+    else
+        say "gamescale is gone. Remove 'gamescale' from your Steam launch options."
+    fi
     exit 0
 fi
 
@@ -149,9 +203,9 @@ grep -q 'GAMESCALE_SCALE' "$SRC" || die "downloaded file does not look like game
 # Install
 # ---------------------------------------------------------------------------
 
-mkdir -p "$BINDIR" "$STATE_DIR"
-install -m 755 "$SRC" "$TARGET"
-say "installed $TARGET"
+act mkdir -p "$BINDIR" "$STATE_DIR"
+act install -m 755 "$SRC" "$TARGET"
+note "installed $TARGET"
 
 case ":$PATH:" in
     *":$BINDIR:"*) ;;
@@ -186,7 +240,7 @@ else
         *)             new_path="$sandbox_path:$BINDIR" ;;
     esac
 
-    flatpak override --user \
+    act flatpak override --user \
         --filesystem="$BINDIR:ro" \
         --filesystem="$STATE_DIR:create" \
         --talk-name=org.freedesktop.Flatpak \
@@ -194,7 +248,7 @@ else
         "$STEAM_ID" \
         || die "flatpak override failed"
 
-    say "granted Steam: $BINDIR (ro), $STATE_DIR (rw), host portal, PATH"
+    note "granted Steam: $BINDIR (ro), $STATE_DIR (rw), host portal, PATH"
 fi
 
 # ---------------------------------------------------------------------------
@@ -206,9 +260,13 @@ if [ "${GAMESCALE_NO_UNIT:-0}" = "1" ]; then
 elif ! command -v systemctl >/dev/null 2>&1; then
     say "no systemd — skipping login reconcile unit"
 else
-    "$TARGET" --install-unit >/dev/null 2>&1 \
-        && say "installed gamescale-reconcile.service" \
-        || warn "could not install the login reconcile unit (gamescale --install-unit to retry)"
+    if [ "$DRY" = 1 ]; then
+        act "$TARGET" --install-unit
+    elif "$TARGET" --install-unit >/dev/null 2>&1; then
+        say "installed gamescale-reconcile.service"
+    else
+        warn "could not install the login reconcile unit (gamescale --install-unit to retry)"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -216,7 +274,11 @@ fi
 # ---------------------------------------------------------------------------
 
 echo
-"$TARGET" --doctor || true
-echo
-say "Steam launch options:  gamescale %command%"
-say "restart Steam for the new permissions to take effect"
+if [ "$DRY" = 1 ]; then
+    say "dry run finished — nothing was changed"
+else
+    "$TARGET" --doctor || true
+    echo
+    say "Steam launch options:  gamescale %command%"
+    say "restart Steam for the new permissions to take effect"
+fi

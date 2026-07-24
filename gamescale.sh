@@ -606,8 +606,9 @@ have_host systemd-run || CAN_WATCH=0
 command -v flock >/dev/null 2>&1 || CAN_WATCH=0
 
 if [[ "$MODE" == "doctor" ]]; then
+    DOCTOR_BAD=0
     ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
-    bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; }
+    bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; DOCTOR_BAD=$((DOCTOR_BAD + 1)); }
     echo "gamescale doctor"
     echo
     [[ $IN_FLATPAK == 1 ]] && ok "running sandboxed (flatpak-spawn present)" \
@@ -658,6 +659,16 @@ if [[ "$MODE" == "doctor" ]]; then
         bad "detection failed"
     fi
     state_exists && bad "stale state present — run --restore" || ok "no stale state"
+    # Installing is four independent steps and nothing makes them atomic, so a
+    # run that died halfway leaves exactly this: some checks green, some red.
+    # Re-running the installer is idempotent and fixes every one of them.
+    if [[ $DOCTOR_BAD -gt 0 ]]; then
+        echo
+        echo "  $DOCTOR_BAD check(s) failed. The installer is idempotent — re-running it"
+        echo "  fixes everything above except a stale state file:"
+        echo "    curl -fsSL https://raw.githubusercontent.com/proto-cool/gamescale/main/install.sh | sh"
+        exit 1
+    fi
     exit 0
 fi
 
