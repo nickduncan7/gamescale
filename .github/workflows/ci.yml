@@ -20,7 +20,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: shellcheck
         run: |
           shellcheck --version
@@ -34,7 +34,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The suites stub gdctl, gsettings and systemd-run on PATH; no display,
       # no GNOME, no flatpak involved. flock/setsid/pkill are the only real
       # dependencies, and the watchdog suite skips itself without them.
@@ -56,7 +56,7 @@ jobs:
   version:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: VERSION is present and well-formed
         run: |
           v=$(sed -n 's/^readonly VERSION="\(.*\)"$/\1/p' gamescale.sh)
