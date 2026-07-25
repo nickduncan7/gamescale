@@ -45,12 +45,13 @@ jobs:
       - name: dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends util-linux procps
+          sudo apt-get install -y --no-install-recommends \
+            util-linux procps python3-gi gir1.2-glib-2.0
       - name: shellcheck
         run: shellcheck -S style gamescale.sh install.sh test/*.sh
       - name: tests
         run: |
-          ./test/detect_test.sh
+          ./test/detect_test.py
           ./test/state_test.sh
           ./test/watchdog_test.sh
         timeout-minutes: 5

@@ -11,10 +11,10 @@ GNOME/Mutter on Wayland. Works with Flatpak Steam and other Flatpak launchers.
 > and this one changes your display configuration — read the script before you
 > run it. It isn't unvalidated, though: the numbers below were measured on a
 > Lenovo Legion Pro 7i (2560×1600 at 133%) running Fedora Silverblue 44, GNOME
-> 50.3 and Flatpak Steam, and CI runs shellcheck plus three test suites — 41
-> assertions over the parser, the state format, and the restore-after-SIGKILL
-> path — on every push. Other GNOME versions and other hardware are less
-> certain; issues welcome.
+> 50.3 and Flatpak Steam, and CI runs shellcheck plus three test suites — 47
+> assertions over the display-state reader, the state format, and the
+> restore-after-SIGKILL path — on every push. Other GNOME versions and other
+> hardware are less certain; issues welcome.
 
 ## The problem
 
@@ -276,20 +276,43 @@ gsettings reset org.gnome.desktop.interface cursor-size
 ## Requirements
 
 - GNOME 48+ on Wayland (`gdctl` ships with Mutter)
+- `python3` with PyGObject, to read the display state. Not a new dependency:
+  `gdctl` is itself a python3 + PyGObject script, so any system with `gdctl` has
+  both already
 - `flock` and `systemd-run` for the watchdog — optional, degrades to trap-only
-- `xmllint` for the `monitors.xml` fallback — optional
+
+## How the display state is read
+
+Detection asks mutter over `org.gnome.Mutter.DisplayConfig.GetCurrentState` —
+the interface `gdctl` itself calls — and gets position, scale, transform,
+primary and connectors back as typed values. Applying still goes through `gdctl
+set`, whose flags are a stable contract.
+
+It used to scrape `gdctl show`, which is output meant for humans: no stability
+contract, drawn with box glyphs, and connector names recovered by anchoring past
+them. A GNOME release that reflowed that tree would have broken detection
+silently. One casualty worth naming: `gdctl` numbers transforms in an order its
+own names don't suggest — 6 is `flipped-270` and 7 is `flipped-180`, the reverse
+of mutter's enum order — so a reader that formatted the raw value the obvious way
+would rotate two of the eight configurations wrongly on restore.
+
+If reading fails for any reason, the game launches unmodified. Restoring doesn't
+depend on it at all: `--restore` replays the state file and never re-reads the
+display, so a broken reader can decline to scale you but can't strand you at 1×.
 
 ## Development
 
 ```sh
 shellcheck -S style gamescale.sh install.sh test/*.sh
-./test/detect_test.sh      # gdctl output parsing, connector-name edge cases
+./test/detect_test.py      # the reader, against synthetic mutter replies
 ./test/state_test.sh       # state format, and the exact config gdctl is sent
 ./test/watchdog_test.sh    # restore after SIGKILL, and no restore before it
 ```
 
-The suites stub `gdctl`, `gsettings` and `systemd-run` on `PATH` and drive the
-real script end to end, so what's under test is the shipped code. No display is
-touched. `test/watchdog_test.sh` takes about 15 seconds; it kills a fake game
-with `SIGKILL` so the trap never runs, then asserts the watchdog restored
-anyway.
+No display is touched by any of them. `detect_test.py` extracts the reader out
+of `gamescale.sh` and runs it against real `GLib.Variant`s of GetCurrentState's
+signature, so the shipped reader is what's under test and a wrong signature
+fails there rather than at runtime. The shell suites stub `gdctl`, `gsettings`,
+`systemd-run` and `python3` on `PATH` and drive the real script end to end.
+`watchdog_test.sh` takes about 15 seconds; it kills a fake game with `SIGKILL`
+so the trap never runs, then asserts the watchdog restored anyway.

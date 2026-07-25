@@ -58,7 +58,7 @@ set -uo pipefail
 # display behaviour is unactionable without it: the script is copied to
 # ~/.local/bin, so nothing else on the system records which release it came
 # from. Release CI refuses to publish a tag that disagrees with this.
-readonly VERSION="1.2.0"
+readonly VERSION="1.3.0"
 
 readonly IFACE_SCHEMA="org.gnome.desktop.interface"
 readonly WATCHDOG_TIMEOUT=43200   # 12h ceiling; watchdog self-terminates after
@@ -145,18 +145,26 @@ fround() { awk -v a="$1" 'BEGIN { printf "%d", (a < 0 ? a - 0.5 : a + 0.5) }'; }
 feq()    { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a - b < 1e-9 && b - a < 1e-9) }'; }
 
 # ---------------------------------------------------------------------------
-# Detection — parses the "Logical monitors:" section of `gdctl show`:
+# Detection — asks mutter directly, over
+# org.gnome.Mutter.DisplayConfig.GetCurrentState.
 #
-#   Logical monitors:
-#   ├──Logical monitor #1
-#   │  ├──Position: (1920, 0)
-#   │  ├──Scale: 1.3333333730697632
-#   │  ├──Transform: normal
-#   │  ├──Primary: no
-#   │  └──Monitors: (1)
-#   │      └──HDMI-1 (RTK 16")
-#   └──Logical monitor #2
-#      ...
+# This used to scrape the "Logical monitors:" tree out of `gdctl show` with awk.
+# That output is meant for humans: it has no stability contract, it is drawn
+# with box glyphs, and a connector name had to be recovered by anchoring past
+# them (an unanchored match found "A-1" inside "HDMI-A-1", which gdctl then
+# rejected as an unknown monitor — the v1.0.1 regression). A GNOME release that
+# reflows that tree breaks detection silently.
+#
+# GetCurrentState is the interface gdctl itself calls, and it hands over the
+# same fields as typed values: position, scale as a double, transform as an
+# enum, primary as a bool, and every connector driven by each logical monitor.
+# No new dependency comes with it — gdctl IS a python3 + PyGObject script, so
+# wherever gdctl exists so do both.
+#
+# Applying still goes through `gdctl set`, whose flags ARE a stable contract.
+# Doing that over D-Bus as well would mean picking a mode id per monitor out of
+# GetCurrentState's mode list and threading the config serial through, which is
+# most of what gdctl's 1500 lines are for.
 #
 # EVERY logical monitor is captured, not just the primary one, because the
 # XWayland scale factor is global: it only drops to 1 when every monitor is at
@@ -168,67 +176,93 @@ feq()    { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a - b < 1e-9 && b - a < 1e-9)
 # command is a monitor switched off. Everything detected here must be replayed.
 #
 # Scales are full-precision doubles, stored and replayed verbatim, so gdctl
-# accepts them as supported values on restore.
+# accepts them as supported values on restore. Python's repr of a double is its
+# shortest round-tripping form, so 1.3333333730697632 survives without any
+# number ever being parsed out of text.
 # ---------------------------------------------------------------------------
 
 # Parallel arrays, one entry per logical monitor. MON_CONNS holds a
 # comma-separated list because a mirrored logical monitor drives several.
 MON_CONNS=(); MON_SCALE=(); MON_PRIM=(); MON_X=(); MON_Y=(); MON_TRANSFORM=()
 
-parse_gdctl_show() {
-    awk '
-        /^Logical monitors:/ { section = 1; next }
-        !section { next }
-        # A new unindented "Word:" heading ends the section.
-        /^[A-Za-z][A-Za-z ]*:/ { section = 0; next }
-        /Logical monitor #/ {
-            if (n) print rec(n)
-            n++; in_monitors = 0
-            conns[n] = ""; scale[n] = 1; prim[n] = "no"
-            x[n] = 0; y[n] = 0; transform[n] = "normal"
-            next
-        }
-        !n { next }
-        /Position:/  { if (match($0, /\(-?[0-9]+, *-?[0-9]+\)/)) {
-                           pos = substr($0, RSTART + 1, RLENGTH - 2)
-                           sub(/, */, " ", pos)
-                           split(pos, p, " ")
-                           x[n] = p[1]; y[n] = p[2]
-                       }
-                       next }
-        /Scale:/     { if (match($0, /[0-9]+\.?[0-9]*/))
-                           scale[n] = substr($0, RSTART, RLENGTH)
-                       next }
-        /Transform:/ { if (match($0, /(normal|flipped-?[0-9]*|90|180|270)/))
-                           transform[n] = substr($0, RSTART, RLENGTH)
-                       next }
-        /Primary:/   { if ($0 ~ /yes/) prim[n] = "yes"; next }
-        /Monitors:/  { in_monitors = 1; next }
-        in_monitors {
-            # The connector is the first token after the box glyphs:
-            # "    └──HDMI-A-1 (Dell U2723QE)". Strip the glyphs and anchor,
-            # rather than searching mid-string — an unanchored search for
-            # name-dash-digits finds "A-1" inside "HDMI-A-1", which gdctl then
-            # rejects as an unknown monitor.
-            line = $0
-            sub(/^[^A-Za-z0-9]*/, "", line)
-            if (match(line, /^[A-Za-z][A-Za-z0-9]*([-_][A-Za-z0-9]+)+/)) {
-                c = substr(line, RSTART, RLENGTH)
-                conns[n] = (conns[n] == "") ? c : conns[n] "," c
-            }
-            next
-        }
-        function rec(i) {
-            return conns[i] "\t" scale[i] "\t" prim[i] "\t" \
-                   x[i] "\t" y[i] "\t" transform[i]
-        }
-        END { if (n && conns[n] != "") print rec(n) }
-    '
+# One tab-separated record per logical monitor, in mutter's own order:
+#
+#   <connectors>\t<scale>\t<primary>\t<x>\t<y>\t<transform>
+#
+# The body between <<'PY' and PY is extracted verbatim by test/detect_test.py
+# and run against synthetic variants, so the reader under test is this one and
+# not a copy of it. Keep the markers on their own lines.
+detect() {
+    local out
+    out=$(host python3 - <<'PY'
+import sys
+
+import gi
+
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio
+
+# gdctl's numeric -> CLI spelling, copied from its Transform.enum_names table.
+# 6 and 7 are NOT in the order the names suggest: gdctl calls 6 flipped-270 and
+# 7 flipped-180, the reverse of mutter's own FLIPPED_180/FLIPPED_270 enum order.
+# These strings are handed straight back to `gdctl set --transform`, so gdctl's
+# spelling is the one that matters. Getting it from the intuitive order instead
+# would silently rotate two of the eight configurations wrongly on restore.
+TRANSFORM = {
+    0: "normal",
+    1: "90",
+    2: "180",
+    3: "270",
+    4: "flipped",
+    5: "flipped-90",
+    6: "flipped-270",
+    7: "flipped-180",
 }
 
-detect_from_gdctl() {
-    local out line
-    out=$(host gdctl show 2>/dev/null) || return 1
+try:
+    proxy = Gio.DBusProxy.new_for_bus_sync(
+        bus_type=Gio.BusType.SESSION,
+        flags=Gio.DBusProxyFlags.NONE,
+        info=None,
+        name="org.gnome.Mutter.DisplayConfig",
+        object_path="/org/gnome/Mutter/DisplayConfig",
+        interface_name="org.gnome.Mutter.DisplayConfig",
+        cancellable=None,
+    )
+    state = proxy.call_sync(
+        method_name="GetCurrentState",
+        parameters=None,
+        flags=Gio.DBusCallFlags.NO_AUTO_START,
+        timeout_msec=-1,
+        cancellable=None,
+    )
+except Exception as exc:
+    print("gamescale: cannot read display state: %s" % exc, file=sys.stderr)
+    raise SystemExit(1)
+
+_serial, _monitors, logical, _props = state.unpack()
+
+for x, y, scale, transform, primary, monitors, _mprops in logical:
+    transform_name = TRANSFORM.get(transform)
+    if transform_name is None:
+        # A transform gdctl has no spelling for cannot be replayed through it,
+        # and a layout we cannot put back is one we must not take apart.
+        print("gamescale: unknown transform %r" % transform, file=sys.stderr)
+        raise SystemExit(1)
+    print(
+        "\t".join(
+            [
+                ",".join(m[0] for m in monitors),
+                repr(scale),
+                "yes" if primary else "no",
+                str(x),
+                str(y),
+                transform_name,
+            ]
+        )
+    )
+PY
+    ) || return 1
 
     MON_CONNS=(); MON_SCALE=(); MON_PRIM=(); MON_X=(); MON_Y=(); MON_TRANSFORM=()
     while IFS=$'\t' read -r conns scale prim x y transform; do
@@ -236,46 +270,14 @@ detect_from_gdctl() {
         MON_CONNS+=("$conns");   MON_SCALE+=("$scale")
         MON_PRIM+=("$prim");     MON_X+=("$x")
         MON_Y+=("$y");           MON_TRANSFORM+=("$transform")
-    done < <(parse_gdctl_show <<<"$out")
+    done <<<"$out"
 
     [[ ${#MON_CONNS[@]} -gt 0 ]] || return 1
+    local i
     for ((i = 0; i < ${#MON_CONNS[@]}; i++)); do
-        log "gdctl: ${MON_CONNS[i]} @ ${MON_SCALE[i]} (${MON_X[i]},${MON_Y[i]}) primary=${MON_PRIM[i]}"
+        log "mutter: ${MON_CONNS[i]} @ ${MON_SCALE[i]} (${MON_X[i]},${MON_Y[i]}) primary=${MON_PRIM[i]}"
     done
 }
-
-# Fallback: saved config rather than live state. Single monitor only — if
-# gdctl is unavailable we have no reliable way to replay a layout, and a
-# half-replayed layout is worse than declining to touch it.
-detect_from_xml() {
-    local xml="${HOST_HOME}/.config/monitors.xml" connector scale
-    host test -r "$xml" || return 1
-    have_host xmllint || return 1
-
-    connector=$(host xmllint --xpath \
-        'string((//configuration/logicalmonitor[primary="yes"]/monitor/monitorspec/connector)[1])' \
-        "$xml" 2>/dev/null)
-    scale=$(host xmllint --xpath \
-        'string((//configuration/logicalmonitor[primary="yes"]/scale)[1])' \
-        "$xml" 2>/dev/null)
-
-    if [[ -z "$connector" ]]; then
-        connector=$(host xmllint --xpath \
-            'string((//configuration/logicalmonitor/monitor/monitorspec/connector)[1])' \
-            "$xml" 2>/dev/null)
-        scale=$(host xmllint --xpath \
-            'string((//configuration/logicalmonitor/scale)[1])' \
-            "$xml" 2>/dev/null)
-    fi
-
-    [[ -n "$connector" && -n "$scale" ]] || return 1
-    MON_CONNS=("$connector"); MON_SCALE=("$scale"); MON_PRIM=("yes")
-    MON_X=(0); MON_Y=(0); MON_TRANSFORM=("normal")
-    log "monitors.xml: $connector @ $scale"
-}
-
-# Live state first, saved config as a fallback.
-detect() { detect_from_gdctl || detect_from_xml; }
 
 # The primary monitor's scale drives the font/cursor compensation, since that's
 # the display you'll be reading the desktop on.
@@ -473,7 +475,7 @@ restore_survivors() {
              s_y=("${MON_Y[@]}")             s_tr=("${MON_TRANSFORM[@]}")
     local present i first has_primary=0
 
-    detect_from_gdctl || return 1
+    detect || return 1
     present=" ${MON_CONNS[*]//,/ } "
 
     MON_CONNS=(); MON_SCALE=(); MON_PRIM=(); MON_X=(); MON_Y=(); MON_TRANSFORM=()
@@ -589,8 +591,11 @@ fi
 # Dependency checks (run/status/doctor)
 # ---------------------------------------------------------------------------
 
+# python3 reads the display state, gdctl applies it, gsettings carries the
+# font/cursor compensation. gdctl is itself a python3 + PyGObject script, so on
+# any system that has it all three of these are already present.
 MISSING=()
-for cmd in gdctl gsettings; do
+for cmd in gdctl gsettings python3; do
     have_host "$cmd" || MISSING+=("$cmd")
 done
 
@@ -610,9 +615,16 @@ if [[ "$MODE" == "doctor" ]]; then
         ok "running on the host"
     fi
     if [[ ${#MISSING[@]} -eq 0 ]]; then
-        ok "gdctl + gsettings reachable"
+        ok "gdctl + gsettings + python3 reachable"
     else
         bad "unreachable: ${MISSING[*]}  →  needs --talk-name=org.freedesktop.Flatpak"
+    fi
+    # A python3 without PyGObject passes `command -v` and then fails at the
+    # first import, so check the import rather than the interpreter.
+    if host python3 -c 'import gi; gi.require_version("Gio", "2.0")' 2>/dev/null; then
+        ok "PyGObject present (reads mutter's display state)"
+    else
+        bad "python3 cannot import gi  →  install python3-gobject-base"
     fi
     host mkdir -p "$STATE_DIR" 2>/dev/null
     if host sh -c "touch '$STATE_DIR/.probe' && rm -f '$STATE_DIR/.probe'" 2>/dev/null; then

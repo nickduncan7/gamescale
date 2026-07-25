@@ -38,12 +38,16 @@ jobs:
       # The suites stub gdctl, gsettings and systemd-run on PATH; no display,
       # no GNOME, no flatpak involved. flock/setsid/pkill are the only real
       # dependencies, and the watchdog suite skips itself without them.
+      # python3-gi is what the detection reader needs. It is the same dependency
+      # gdctl has, so on a GNOME system it is never a separate install; here it
+      # is, because a CI runner has no GNOME.
       - name: dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends util-linux procps
+          sudo apt-get install -y --no-install-recommends \
+            util-linux procps python3-gi gir1.2-glib-2.0
       - name: monitor detection
-        run: ./test/detect_test.sh
+        run: ./test/detect_test.py
       - name: state format and generated configuration
         run: ./test/state_test.sh
       - name: watchdog resilience
