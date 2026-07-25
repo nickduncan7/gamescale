@@ -50,8 +50,16 @@ trap cleanup EXIT
 
 cat > "$STUBS/gdctl" <<'STUB'
 #!/bin/sh
-if [ "$1" = "show" ]; then printf '%s\n' "$GDCTL_FIXTURE"; exit 0; fi
 echo "$*" >> "$GDCTL_LOG"
+exit 0
+STUB
+
+# Stands in for the python reader; detect_test.py covers the real one. Consumes
+# stdin because the script pipes the reader source into it.
+cat > "$STUBS/python3" <<'STUB'
+#!/bin/sh
+cat >/dev/null
+printf '%s\n' "$DETECT_FIXTURE"
 exit 0
 STUB
 
@@ -81,17 +89,9 @@ setsid "$@" >/dev/null 2>&1 &
 exit 0
 STUB
 
-chmod +x "$STUBS/gdctl" "$STUBS/gsettings" "$STUBS/systemd-run"
+chmod +x "$STUBS/gdctl" "$STUBS/gsettings" "$STUBS/systemd-run" "$STUBS/python3"
 
-FIXTURE=$(printf '%s\n' \
-    'Logical monitors:' \
-    '└──Logical monitor #1' \
-    '   ├──Position: (0, 0)' \
-    '   ├──Scale: 1.3333333730697632' \
-    '   ├──Transform: normal' \
-    '   ├──Primary: yes' \
-    '   └──Monitors: (1)' \
-    '       └──eDP-1 (Built-in display)')
+FIXTURE=$(printf 'eDP-1\t1.3333333730697632\tyes\t0\t0\tnormal')
 
 PASS=0; FAIL=0
 ok()  { printf '  \033[32mok\033[0m   %s\n' "$1"; PASS=$((PASS + 1)); }
@@ -99,7 +99,7 @@ bad() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1));
         printf '        gdctl log: %s\n' "$(tr '\n' '|' < "$LOG")"; }
 
 gamescale() {
-    GDCTL_FIXTURE="$FIXTURE" GDCTL_LOG="$LOG" SYSTEMD_RUN_LOG="$RUNLOG" \
+    DETECT_FIXTURE="$FIXTURE" GDCTL_LOG="$LOG" SYSTEMD_RUN_LOG="$RUNLOG" \
     HOME="$FAKEHOME" PATH="$STUBS:$PATH" \
         bash "$SCRIPT" "$@"
 }

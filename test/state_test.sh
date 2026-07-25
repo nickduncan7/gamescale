@@ -8,6 +8,11 @@
 # configuration, so a monitor missing from a generated command is a monitor
 # switched off.
 #
+# python3 is stubbed to emit detection records directly. The reader it stands in
+# for is tested against real mutter replies in detect_test.py; what is under
+# test here is everything downstream of it — the arrays, the state file, and the
+# gdctl command line built from them.
+#
 #   ./test/state_test.sh
 
 set -uo pipefail
@@ -23,8 +28,16 @@ LOG="$WORK/gdctl.log"
 
 cat > "$STUBS/gdctl" <<'STUB'
 #!/bin/sh
-if [ "$1" = "show" ]; then printf '%s\n' "$GDCTL_FIXTURE"; exit 0; fi
 echo "$*" >> "$GDCTL_LOG"
+exit 0
+STUB
+
+# Detection reads the script the real one pipes to python3 off stdin, so the
+# stub has to consume it or the writer gets EPIPE.
+cat > "$STUBS/python3" <<'STUB'
+#!/bin/sh
+cat >/dev/null
+printf '%s\n' "$DETECT_FIXTURE"
 exit 0
 STUB
 
@@ -37,30 +50,20 @@ case "$3" in
 esac
 STUB
 
-chmod +x "$STUBS/gdctl" "$STUBS/gsettings"
+chmod +x "$STUBS/gdctl" "$STUBS/gsettings" "$STUBS/python3"
 
+# conns \t scale \t primary \t x \t y \t transform, one per logical monitor.
+# HDMI-1 first and non-primary, so nothing can pass by assuming the primary
+# comes first or that mutter's order is the layout order.
 TWO_MONITORS=$(printf '%s\n' \
-    'Logical monitors:' \
-    '├──Logical monitor #1' \
-    '│  ├──Position: (1920, 0)' \
-    '│  ├──Scale: 1.3333333730697632' \
-    '│  ├──Transform: normal' \
-    '│  ├──Primary: no' \
-    '│  └──Monitors: (1)' \
-    '│      └──HDMI-1 (RTK 16")' \
-    '└──Logical monitor #2' \
-    '   ├──Position: (0, 0)' \
-    '   ├──Scale: 1.3333333730697632' \
-    '   ├──Transform: normal' \
-    '   ├──Primary: yes' \
-    '   └──Monitors: (1)' \
-    '       └──eDP-1 (Built-in display)')
+    "$(printf 'HDMI-1\t1.3333333730697632\tno\t1920\t0\tnormal')" \
+    "$(printf 'eDP-1\t1.3333333730697632\tyes\t0\t0\tnormal')")
 
 PASS=0; FAIL=0
 
 run() {  # run MODE-ARGS... ; returns exit status, fills $LOG
     : > "$LOG"
-    GDCTL_FIXTURE="$TWO_MONITORS" GDCTL_LOG="$LOG" \
+    DETECT_FIXTURE="$TWO_MONITORS" GDCTL_LOG="$LOG" \
     GAMESCALE_NO_WATCH=1 HOME="$FAKEHOME" PATH="$STUBS:$PATH" \
         bash "$SCRIPT" "$@" >/dev/null 2>&1
 }
