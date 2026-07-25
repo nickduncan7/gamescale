@@ -32,11 +32,16 @@
 # session is the most consequential thing this script does, so it is never done
 # to an app you did not name.
 #
+# Downloads are checked against the SHA256SUMS published with the release, and
+# refused if they don't match. Releases before v1.2.0 have no SHA256SUMS asset;
+# installing one needs GAMESCALE_NO_VERIFY=1.
+#
 # ENV
 #   GAMESCALE_REF          tag to install               (default: latest release)
 #   GAMESCALE_BINDIR       install location             (default: ~/.local/bin)
 #   GAMESCALE_NO_FLATPAK   1 to skip launcher grants entirely
 #   GAMESCALE_NO_UNIT      1 to skip the login reconcile unit
+#   GAMESCALE_NO_VERIFY    1 to install without checking the checksum
 
 set -eu
 
@@ -238,24 +243,63 @@ CLEANUP=""
 # shellcheck disable=SC2086
 trap 'if [ -n "$CLEANUP" ]; then rm -f $CLEANUP; fi' EXIT INT TERM
 
-self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || self_dir=""
+# Whichever of the three is here — coreutils, perl's, or openssl. All three
+# read stdin so the filename never reaches the output that gets parsed.
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum < "$1" | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 < "$1" | cut -d' ' -f1
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 < "$1" | sed 's/^.*= *//'
+    else
+        return 1
+    fi
+}
+
+self_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || self_dir=""
 if [ -n "$self_dir" ] && [ -r "$self_dir/gamescale.sh" ]; then
     SRC="$self_dir/gamescale.sh"
     say "installing from checkout: $SRC"
 else
     ref="${GAMESCALE_REF:-}"
     if [ -n "$ref" ]; then
-        url="https://github.com/$REPO/releases/download/$ref/gamescale.sh"
+        base="https://github.com/$REPO/releases/download/$ref"
     else
-        url="https://github.com/$REPO/releases/latest/download/gamescale.sh"
+        base="https://github.com/$REPO/releases/latest/download"
     fi
 
     command -v curl >/dev/null 2>&1 || die "curl is required to download gamescale"
     SRC=$(mktemp) || die "could not create a temporary file"
     CLEANUP="$SRC"
     say "downloading ${ref:-latest release}"
-    curl -fsSL "$url" -o "$SRC" \
-        || die "download failed: $url (is there a release with gamescale.sh attached?)"
+    curl -fsSL "$base/gamescale.sh" -o "$SRC" \
+        || die "download failed: $base/gamescale.sh (is there a release with gamescale.sh attached?)"
+
+    # Verify against the checksums published with the release. Fails closed: a
+    # script that grants a sandbox access to your session is not one to install
+    # on the strength of "the transfer didn't error".
+    if [ "${GAMESCALE_NO_VERIFY:-0}" = "1" ]; then
+        warn "skipping checksum verification (GAMESCALE_NO_VERIFY=1)"
+    else
+        SUMS=$(mktemp) || die "could not create a temporary file"
+        CLEANUP="$CLEANUP $SUMS"
+        # curl's own 404 line would read like a bug; the message below says
+        # what actually happened.
+        curl -fsSL "$base/SHA256SUMS" -o "$SUMS" 2>/dev/null || die \
+            "no SHA256SUMS published for ${ref:-the latest release}. Releases
+   before v1.2.0 don't have one — GAMESCALE_NO_VERIFY=1 to install anyway."
+        got=$(sha256_of "$SRC") \
+            || die "no sha256sum, shasum or openssl to verify the download with"
+        if grep -q "^$got  *gamescale.sh\$" "$SUMS"; then
+            say "checksum verified: $got"
+        else
+            die "CHECKSUM MISMATCH — refusing to install.
+   got:      $got
+   expected: $(sed -n 's/  *gamescale\.sh$//p' "$SUMS" | head -n 1)
+   Re-run to rule out a corrupt transfer. If it persists, open an issue."
+        fi
+    fi
 fi
 
 # Guard against installing a 404 page or a truncated transfer as an executable.
@@ -296,6 +340,8 @@ grant_app() {
     # has a different one, and --env=PATH replaces the value outright. Starting
     # from whatever the app ships today is the only way to avoid pinning a
     # stale one, and it keeps re-running idempotent.
+    # $PATH is deliberately unexpanded here: it is evaluated inside the sandbox.
+    # shellcheck disable=SC2016
     sandbox_path=$(flatpak run --command=sh "$app" -c 'printf %s "$PATH"' 2>/dev/null) || sandbox_path=""
     if [ -z "$sandbox_path" ]; then
         sandbox_path="/app/bin:/app/utils/bin:/usr/bin"

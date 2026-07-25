@@ -1,0 +1,75 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to publish assets for'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: resolve tag
+        id: tag
+        run: |
+          tag="${{ github.event.inputs.tag }}"
+          [ -n "$tag" ] || tag="${GITHUB_REF#refs/tags/}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # A tag saying v1.2.0 that installs a script reporting 1.1.0 makes every
+      # bug report from it misleading. Refuse to publish that rather than fix
+      # it after the fact — a release asset can be replaced, but not unshipped.
+      - name: tag matches VERSION
+        run: |
+          tag="${{ steps.tag.outputs.tag }}"
+          version=$(sed -n 's/^readonly VERSION="\(.*\)"$/\1/p' gamescale.sh)
+          if [ "$tag" != "v$version" ]; then
+            echo "tag $tag but gamescale.sh reports VERSION=$version" >&2
+            exit 1
+          fi
+          echo "$tag == v$version"
+
+      # The same gate as ci.yml. Duplicated on purpose: a release should not be
+      # publishable on the strength of a green run from some earlier commit.
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends util-linux procps
+      - name: shellcheck
+        run: shellcheck -S style gamescale.sh install.sh test/*.sh
+      - name: tests
+        run: |
+          ./test/detect_test.sh
+          ./test/state_test.sh
+          ./test/watchdog_test.sh
+        timeout-minutes: 5
+
+      # What install.sh verifies its download against. Without this asset the
+      # installer refuses to install at all, so it is not optional.
+      - name: checksums
+        run: |
+          sha256sum gamescale.sh install.sh > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.tag.outputs.tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" gamescale.sh install.sh SHA256SUMS --clobber
+          else
+            gh release create "$tag" --title "$tag" --generate-notes \
+              gamescale.sh install.sh SHA256SUMS
+          fi
