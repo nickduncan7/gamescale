@@ -437,7 +437,7 @@ parse_monitor_record() {
 }
 
 state_parse() {
-    local blob line key value v1_conn="" v1_scale=""
+    local blob line key value
     blob=$(state_read) || return 1
     [[ -n "$blob" ]] || return 1
 
@@ -454,19 +454,9 @@ state_parse() {
             monitor)     parse_monitor_record "$value" || return 1 ;;
             text_scale)  is_number    "$value" && text_scale="$value"  || return 1 ;;
             cursor_size) is_integer   "$value" && cursor_size="$value" || return 1 ;;
-            # v1 (1.0.1 and earlier): one primary monitor, no layout. Read so
-            # that upgrading mid-game still restores rather than stranding you.
-            connector)   is_connector "$value" && v1_conn="$value"     || return 1 ;;
-            scale)       is_number    "$value" && v1_scale="$value"    || return 1 ;;
             *) return 1 ;;
         esac
     done <<<"$blob"
-
-    if [[ -n "$v1_conn" ]]; then
-        [[ ${#MON_CONNS[@]} -eq 0 && -n "$v1_scale" ]] || return 1
-        MON_CONNS=("$v1_conn"); MON_SCALE=("$v1_scale"); MON_PRIM=("yes")
-        MON_X=(0); MON_Y=(0); MON_TRANSFORM=("normal")
-    fi
 
     [[ ${#MON_CONNS[@]} -gt 0 ]]
 }
