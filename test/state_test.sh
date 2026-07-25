@@ -106,18 +106,6 @@ else
     ok "restore: state cleared on success"
 fi
 
-# --- v1 state files still restore ----------------------------------------
-# Someone upgrading between v1.0.1 and v1.1.0 mid-game has one of these on
-# disk; refusing it would strand their desktop at 1x.
-printf 'connector=eDP-1\nscale=1.5\ntext_scale=1.0\ncursor_size=24\n' > "$STATE"
-run --restore
-want "v1 state: still replayed" "--primary --monitor eDP-1 --scale 1.5"
-if [[ -f "$STATE" ]]; then
-    bad "v1 state: cleared on success"
-else
-    ok "v1 state: cleared on success"
-fi
-
 # --- malformed input fails closed ----------------------------------------
 reject() {
     printf '%b' "$2" > "$STATE"
@@ -135,6 +123,9 @@ reject() {
 # shellcheck disable=SC2016
 reject "command substitution"  'version=2\nmonitor=eDP-1;$(touch /tmp/x);yes;0;0;normal\n'
 reject "unknown key"           'version=2\nmonitor=eDP-1;1.5;yes;0;0;normal\nevil=1\n'
+# v1's format (1.0.1 and earlier) is no longer understood, and an unreadable
+# state file is refused rather than guessed at.
+reject "v1 state file"         'connector=eDP-1\nscale=1.5\ntext_scale=1.0\n'
 reject "future version"        'version=3\nmonitor=eDP-1;1.5;yes;0;0;normal\n'
 reject "too few fields"        'version=2\nmonitor=eDP-1;1.5;yes\n'
 reject "bad transform"         'version=2\nmonitor=eDP-1;1.5;yes;0;0;sideways\n'
