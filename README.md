@@ -1,56 +1,55 @@
 # gamescale
 
+[![ci](https://github.com/proto-cool/gamescale/actions/workflows/ci.yml/badge.svg)](https://github.com/proto-cool/gamescale/actions/workflows/ci.yml)
+
 Run a game at 1× monitor scale so XWayland hands it your panel's real mode
 instead of an overscaled framebuffer — then put your desktop back when it exits.
 
-Written for GNOME/Mutter on Wayland. Works with Flatpak Steam.
+GNOME/Mutter on Wayland. Works with Flatpak Steam and other Flatpak launchers.
 
 > **Built with [Claude](https://claude.ai) by Anthropic.** AI makes mistakes,
 > and this one changes your display configuration — read the script before you
-> run it. That said, it isn't unvalidated: every claim in this README was
-> measured on the hardware it was written for, a Lenovo Legion Pro 7i
-> (2560×1600 at 133%) running Fedora Silverblue 44 with GNOME 50.3 and Flatpak
-> Steam, including the multi-monitor numbers below, and the repo has tests that
-> stub `gdctl` and assert on the exact configuration it would apply. Behaviour
-> on other GNOME versions, other compositors, or hardware I couldn't test is
-> less certain — issues welcome.
-
----
+> run it. It isn't unvalidated, though: the numbers below were measured on a
+> Lenovo Legion Pro 7i (2560×1600 at 133%) running Fedora Silverblue 44, GNOME
+> 50.3 and Flatpak Steam, and CI runs shellcheck plus three test suites — 41
+> assertions over the parser, the state format, and the restore-after-SIGKILL
+> path — on every push. Other GNOME versions and other hardware are less
+> certain; issues welcome.
 
 ## The problem
 
-Under GNOME fractional scaling, XWayland is given an **integer** scale factor
-applied to your *logical* resolution. On a 2560×1600 panel at 133% scale:
+Under GNOME fractional scaling, XWayland gets an **integer** scale factor
+applied to your *logical* resolution. On a 2560×1600 panel at 133%:
 
 | | |
 |---|---|
 | Panel (physical) | 2560×1600 |
 | Logical | 1920×1200 |
-| XWayland factor `1` | reports **1920×1200** → game renders small, gets stretched up (blurry, cheap) |
-| XWayland factor `2` | reports **3840×2400** → game renders 2.25× your panel's pixels (sharp, expensive) |
+| XWayland factor `1` | reports **1920×1200** → renders small, stretched up (blurry, cheap) |
+| XWayland factor `2` | reports **3840×2400** → renders 2.25× your panel's pixels (sharp, expensive) |
 
-Neither is 2560×1600. Games with borderless-fullscreen-only display options —
-no resolution picker, they just take whatever the desktop reports — have no way
-to opt out. You either eat a 2.25× render cost or you play a blurry upscale.
-
-`xwayland-scaling-factor` is a **single global value** with no per-app or
-per-window override. Per-application X11 scaling doesn't exist on any
-compositor; X11 has one screen with one geometry. KWin exposes a "legacy apps
-apply scaling themselves" mode that GNOME lacks, but it's equally global.
+Neither is 2560×1600. Games with borderless-fullscreen-only display options take
+whatever the desktop reports and have no way to opt out, so you eat a 2.25×
+render cost or play a blurry upscale. `xwayland-scaling-factor` is a single
+global value with no per-app override, and per-application X11 scaling doesn't
+exist on any compositor — X11 has one screen with one geometry.
 
 **Scale 1.0 is the only configuration where XWayland is handed 2560×1600.**
-That's what this does, for the lifetime of one process.
+That's what this does, for the lifetime of one process. Since a permanently
+unscaled desktop is a tiny desktop, it also scales font and cursor by the
+inverse factor while the game runs, and reverts both on exit.
 
-Fixing this by turning off fractional scaling permanently means a tiny desktop.
-So gamescale also scales your font and cursor by the inverse factor while the
-game runs — poor man's fractional scaling — and reverts both on exit.
+This is a workaround, and it should have an end date. Upstream tracks the gaps in
+[mutter#478](https://gitlab.gnome.org/GNOME/mutter/-/work_items/478) —
+*Fractional Scaling Known issues and TODO*, still open — whose list includes
+"XWayland clients: support clients with native scaling in unscaled screen". That
+item landing and working is the thing to watch: it makes this repo unnecessary,
+and deleting it then is the intended outcome.
 
 ### Multiple monitors
 
-The XWayland factor is **global**. It only drops to 1 once *every* logical
-monitor is at 1.0 — scaling just the one you play on doesn't help, and is
-actively worse. Measured on a 2560×1600 panel at 133% with a second display
-attached, reading `Screen 0` from inside the Steam sandbox:
+The XWayland factor only drops to 1 once *every* logical monitor is at 1.0.
+Scaling just the one you play on is actively worse:
 
 | Configuration | Framebuffer | Factor | Cost vs native |
 |---|---|---|---|
@@ -59,60 +58,37 @@ attached, reading `Screen 0` from inside the Steam sandbox:
 | primary 133%, secondary 100% | 3840×2400 | 2 | 2.25× |
 | both at 100% | 2560×1600 | 1 | 1× |
 
-Row 2 is what gamescale did before v1.1.0: the factor stays at 2, but now
-multiplies a full-resolution logical size, so the game renders 78% *more*
-pixels than if you'd never run it. Since v1.1.0 every monitor is set to 1×
-together, and the whole layout — scales, positions, transforms, which display
-was primary — is saved and replayed on exit.
+Row 2 is what gamescale did before v1.1.0 — 78% *more* pixels than never
+running it. Since v1.1.0 every monitor moves to 1× together, and the whole
+layout (scales, positions, transforms, which display was primary) is saved and
+replayed on exit.
 
-### Why not restore the desktop once the game has started?
+### Two things that don't work
 
-Tempting, since a game reads the resolution at startup: hold 1× for a few
-seconds, then put fractional scaling back and enjoy a normal desktop for the
-rest of the session.
-
-Tested on Halo Campaign Evolved under Proton 11: it doesn't hold. Wine tracks
-RandR events and rebuilds its virtual monitor list, and the game followed the
-screen straight back to the overscaled framebuffer the moment the desktop scale
-was restored — MangoHud's resolution readout went from 2560×1600 to 3840×2400.
-
-Note that framerate did **not** change, and the image still looked sharp. At
-factor 2 it always does; the cost is 2.25× the pixels, not visible quality. Any
-test of this by eye or by FPS on a GPU with headroom will report success when
-it has actually failed. That's why the scope is the whole session.
-
-### What about `xwayland-native-scaling`?
-
-GNOME 48+ ships an experimental feature aimed at this:
-
-```sh
-gsettings set org.gnome.mutter experimental-features "['xwayland-native-scaling']"
-```
-
-Tried on GNOME 50.3, 2560×1600 at 133%: still blurry. With fractional scaling
-on, the game appears to render at logical pixels and get upscaled — the same
-result as XWayland factor `1`, reached by a different route. That's an
-observation, not a mechanism; the pixels were visibly soft and 1× scaling
-looked better.
-
-If it works on your hardware, use it — it would be a better fix than this repo.
-Please open an issue saying so.
+- **Restoring the desktop once the game has started.** Wine tracks RandR events
+  and rebuilds its monitor list, so the game follows the screen straight back to
+  the overscaled framebuffer. Measured on Halo Campaign Evolved under Proton 11:
+  MangoHud's readout went 2560×1600 → 3840×2400 the moment scale was restored.
+  Framerate didn't change and it still looked sharp — at factor 2 it always
+  does, the cost is pixels, not visible quality. So testing this by eye or by
+  FPS on a GPU with headroom reports success when it has failed.
+- **`xwayland-native-scaling`.** GNOME 48+ ships this experimental feature aimed
+  at the same problem, and it's the mutter#478 item above. On GNOME 50.3 at 133%
+  it was still blurry — same result as factor `1`, reached another way. If it
+  works on your hardware, use it instead and please open an issue saying so:
+  that's a better fix than this repo.
 
 ## What it does not do
 
-- **Not a gamescope replacement.** No nested compositor, no upscaling, no
-  frame limiting. It changes one display setting and changes it back.
-- **Not per-application, and not per-monitor.** The scope is *temporal*, not
-  spatial. While the game runs, *every* display is at 1× — it has to be, see
-  below. Alt-tabbing shows a smaller desktop with compensated text — better
-  than raw 1×, not identical to your normal setup.
+- **Not a gamescope replacement.** No nested compositor, no upscaling, no frame
+  limiting. It changes one display setting and changes it back.
+- **Not per-application or per-monitor.** The scope is *temporal*. While the
+  game runs, every display is at 1× — it has to be. Alt-tabbing shows a smaller
+  desktop with compensated text.
 - **Doesn't fix title bars, icons, or panel spacing.** Only text and cursor
-  scale. GNOME has no knob for the rest.
-- **Can't help a game that ignores what it's told.** Some games won't offer
-  your panel's native mode no matter what the desktop reports. This changes
-  what XWayland says; a game still has to listen.
-
----
+  scale; GNOME has no knob for the rest.
+- **Can't help a game that ignores what it's told.** This changes what XWayland
+  reports; a game still has to listen.
 
 ## Install
 
@@ -122,17 +98,30 @@ curl -fsSL https://raw.githubusercontent.com/proto-cool/gamescale/main/install.s
 
 Installs to `~/.local/bin/gamescale`, grants Flatpak Steam what it needs,
 installs the login reconcile unit, and runs `--doctor`. It prints every action,
-needs no root, and is safe to re-run. `GAMESCALE_NO_FLATPAK=1` or
-`GAMESCALE_NO_UNIT=1` to opt out of either half; `GAMESCALE_REF=v1.0.0` to pin
-a version; `--dry-run` to see every action without taking any.
+needs no root, and is safe to re-run. Downloads are checked against the
+`SHA256SUMS` published with the release and refused if they don't match.
 
-### Other launchers
+| | |
+|---|---|
+| `--platform NAME...` | which launchers to grant (default `steam`) |
+| `--dry-run` | print every action, take none |
+| `--uninstall` | remove everything it installed |
+| `GAMESCALE_REF=v1.2.0` | pin a version |
+| `GAMESCALE_BINDIR=...` | install somewhere else |
+| `GAMESCALE_NO_FLATPAK=1` | skip launcher grants |
+| `GAMESCALE_NO_UNIT=1` | skip the login reconcile unit |
+| `GAMESCALE_NO_VERIFY=1` | install without checking the checksum |
 
-Steam is the default. Name others with `--platform`:
+Rather not pipe a URL into a shell? Reasonable — this script asks for portal
+access to your session. Clone and read it first; a checkout next to the
+installer wins over any download:
 
 ```sh
-./install.sh --platform steam faugus
+git clone https://github.com/proto-cool/gamescale && cd gamescale
+./install.sh --dry-run     # then without it
 ```
+
+### Other launchers
 
 | name | app id |
 |---|---|
@@ -143,43 +132,14 @@ Steam is the default. Name others with `--platform`:
 | `bottles` | `com.usebottles.bottles` |
 | `all` | every one of the above that is installed |
 
-Any flatpak app id works too. Each app's grants are computed from its own live
-sandbox `PATH`, which differs per launcher — Faugus carries MangoHud, gamescope
-and OBSVkCapture extension directories that Steam doesn't. An app that already
-has `home` access (Faugus does, Steam doesn't) needs only two of the four
-grants.
+Any Flatpak app id works too: `./install.sh --platform steam faugus`. Grants are
+computed from each app's own live sandbox `PATH`, which differs per launcher. An
+app that already has `home` access (Faugus does, Steam doesn't) needs fewer of
+them. The installer names other launchers it finds but never grants to one you
+didn't ask for — handing an app portal access to your session shouldn't happen
+because a script noticed it was installed.
 
-The installer names other launchers it finds but never grants to one you didn't
-ask for. Handing an app portal access to your host session is the most
-consequential thing it does, and that shouldn't happen because a script noticed
-something was installed.
-
-If you'd rather not pipe a URL into a shell — reasonable, given this script
-asks for portal access to your session — clone and read it first:
-
-```sh
-git clone https://github.com/proto-cool/gamescale && cd gamescale
-./install.sh          # installs the gamescale.sh sitting next to it
-```
-
-Or do it by hand:
-
-```sh
-mkdir -p ~/.local/bin ~/.local/state/gamescale
-install -m 755 gamescale.sh ~/.local/bin/gamescale
-```
-
-`~/.local/bin` is on `$PATH` on most distributions, so `gamescale` is now a
-command. The script finds its own path, so the installed name is yours to
-choose.
-
-### Flatpak Steam
-
-The installer does all of this for you; it's spelled out because you should
-know what you granted.
-
-The sandbox can't see your script, can't reach the host session, can't write
-shared state, and can't resolve the name without four grants:
+### What gets granted, and why
 
 ```sh
 flatpak override --user \
@@ -190,88 +150,29 @@ flatpak override --user \
     com.valvesoftware.Steam
 ```
 
-`--talk-name=org.freedesktop.Flatpak` is what `flatpak-spawn --host` rides on.
-Without it the script detects the sandbox, finds it can't reach `gdctl`, and
-passes your game through unmodified.
+The sandbox otherwise can't see the script, can't write shared state, can't
+reach the host session, and can't resolve the bare name.
+`--talk-name=org.freedesktop.Flatpak` is what `flatpak-spawn --host` rides on;
+without it the script passes your game through unmodified. `--env=PATH`
+*replaces* the sandbox PATH rather than extending it, so `--doctor` checks the
+stock entries are still there. Restart the launcher afterwards.
 
-`--env=PATH` is what lets the launch option be a bare `gamescale` instead of an
-absolute path — the sandbox PATH is `/app/bin:/app/utils/bin:/usr/bin` and has
-no notion of your home directory. Note that it *replaces* the sandbox PATH
-rather than extending it, so if a future Steam release adds a directory you
-won't get it; `--doctor` checks the stock entries are still present and tells
-you to re-apply if not. Skip this grant if you'd rather paste the full path.
-
-Restart Steam after any of these.
-
-### Uninstall
-
-```sh
-./install.sh --uninstall            # or: curl -fsSL .../install.sh | sh -s -- --uninstall
-```
-
-Add `--dry-run` to either the install or the uninstall to print every action
-without taking any — worth doing before an install that grants a sandbox you
-care about four permissions.
-
-The uninstaller finds a custom `GAMESCALE_BINDIR` install without being told
-again: it checks the variable, then `PATH`, then the read-only grant given to
-Steam.
-
-Restores your display first if a run died and left it at 1×, then removes the
-binary, the state directory, the systemd unit, and the Steam overrides.
-
-It will **not** touch Steam overrides you added yourself. `flatpak override
+Uninstalling won't touch overrides you added yourself: `flatpak override
 --reset` is the only clean removal and it removes everything, so if there's
-anything in there that isn't gamescale's, the uninstaller prints what to drop
-and leaves the file alone. Don't reach for `--nofilesystem` or `--unset-env` to
-do it by hand: those record explicit *denials* rather than removing a grant,
-and `--unset-env=PATH` wipes Steam's own `PATH`, losing `/app/bin` and
-`/app/utils/bin`. (gamescope and MangoHud survive that — Steam's launcher adds
-their Vulkan extension directories itself at startup, independent of `PATH`.)
-
-### Login reconcile service
-
-Covers the case where the machine goes down mid-game:
-
-```sh
-gamescale --install-unit
-```
-
-### Verify
-
-```sh
-gamescale --doctor
-```
-
-Checks each moving part separately — portal reachability, `gdctl`,
-`gsettings`, state-dir writability from both sides, `systemd-run`, `flock`,
-monitor detection, stale state. When something breaks later, this tells you
-*which* link, instead of a generic failure.
-
-From inside the sandbox specifically:
-
-```sh
-flatpak run --command=gamescale com.valvesoftware.Steam --doctor
-```
-
----
+anything foreign in there the uninstaller prints what to drop and leaves the
+file alone. Don't reach for `--nofilesystem` or `--unset-env` by hand — those
+record explicit *denials*, and `--unset-env=PATH` wipes the app's own `PATH`.
 
 ## Use
 
-Steam launch options — bare name if you applied the `--env=PATH` grant above,
-otherwise the absolute path (Steam won't expand `~`):
+Steam launch options (bare name if you applied the `--env=PATH` grant,
+otherwise an absolute path — Steam won't expand `~`):
 
 ```
 gamescale %command%
 ```
 
-Anywhere else:
-
-```sh
-gamescale -- /path/to/game
-```
-
-### Commands
+Anywhere else: `gamescale -- /path/to/game`.
 
 | | |
 |---|---|
@@ -279,168 +180,92 @@ gamescale -- /path/to/game
 | `--doctor` | full dependency and permission check |
 | `--restore` | put the display back from a stranded state file |
 | `--install-unit` | install the login reconcile service |
-| `--watchdog` | internal; started by systemd, not by you |
-
-### Environment
+| `--version` | which release this is |
 
 | | |
 |---|---|
 | `GAMESCALE_SCALE` | scale while playing (default `1`) |
-| `GAMESCALE_MONITOR` | ignored since v1.1.0 — every monitor has to reach 1× |
 | `GAMESCALE_NO_FONT` | `1` to skip font/cursor compensation |
 | `GAMESCALE_NO_WATCH` | `1` to skip the host watchdog (trap only) |
 | `GAMESCALE_DEBUG` | `1` for verbose logging |
 
----
-
 ## How it survives things
 
-Restoring **cannot** be owned by anything that dies with the game. Under
-Flatpak Steam, the portal connection dies with the sandbox — a trap firing
+Restoring **cannot** be owned by anything that dies with the game: under
+Flatpak Steam the portal connection dies with the sandbox, so a trap firing
 inside a collapsing sandbox has no session bus left to talk to. Ctrl+C on Steam
-reproduces this every time:
+reproduces it every time. So there are three independent layers, any one of
+which is sufficient.
 
-```
-Can't find bus: Could not connect: Connection refused
-gamescale: FAILED to restore scale 1.3333333730697632 on eDP-1
-```
+1. **In-sandbox trap** — fast path for normal exit, usually the one that runs.
+2. **Host-side watchdog** — before launching, the script takes an `flock` and
+   starts a watchdog via `systemd-run --user` that blocks on the same lock. The
+   kernel releases it when the holder dies for *any* reason — exit, `SIGKILL`,
+   segfault, OOM, Ctrl+C on Steam — and the watchdog then wakes on the host,
+   where D-Bus is still alive. No polling, no heartbeat. systemd owns it, so it
+   outlives the sandbox.
+3. **Login reconcile** — a user unit runs `--restore` at session start, covering
+   a hard reboot or a killed watchdog.
 
-So there are three independent layers. Any one is sufficient.
+The descriptor isn't inherited by the game itself: under pressure-vessel the
+game is started through the portal by `steam-runtime-launch-client`, so it isn't
+a descendant of the wrapper. `lsof` on the lock shows the wrapper and the
+watchdog, never `reaper` or `bwrap`. What the lock tracks is the wrapper, which
+blocks until the chain exits.
 
-**1. In-sandbox trap.** Fast path for normal exit. Cheap, and usually the one
-that runs.
+Four invariants make that safe to rely on:
 
-**2. Host-side watchdog.** Before launching, the script takes an `flock` on a
-file in the shared state directory and starts a watchdog through
-`systemd-run --user`. The watchdog blocks trying to acquire that same lock. The
-wrapper holds FD 9 for as long as it sits waiting on the launch chain, and the
-kernel releases it when that process dies for any reason — normal exit,
-`SIGKILL`, segfault, OOM kill, Ctrl+C on Steam, all identical. The watchdog then
-wakes on the host, where D-Bus is still alive, and restores. No polling, no
-heartbeat, no timeout race. systemd owns the watchdog, so it outlives the
-sandbox that spawned it.
+- **Restore is idempotent.** All three layers may fire in any order; the first
+  to succeed clears the state, the rest no-op. A *partial* restore keeps the
+  state file so another layer retries.
+- **Leftover state is restored before detection.** A stranded 1× can never be
+  recorded as your original scale.
+- **A failed scale flip never means a failed game launch.** Every config is
+  checked with `gdctl set --verify` first, and anything unavailable means the
+  game launches unmodified.
+- **State is parsed, never sourced,** and written atomically. The state
+  directory is writable by the sandboxed app, and `--restore` runs on the host
+  from the login unit. Unknown keys and malformed values fail closed.
 
-The descriptor is *not* inherited by the game itself, despite being inheritable
-across fork and exec. Under pressure-vessel the game is started through the
-Flatpak portal by `steam-runtime-launch-client`, so it isn't a descendant of the
-wrapper at all — `lsof` on the lock shows the wrapper and the watchdog, never
-`reaper`, `pv-adverb` or `bwrap`. The lifetime still lines up, because the
-wrapper blocks until the chain exits, but what the lock actually tracks is the
-wrapper, not the game.
-
-**3. Login reconcile.** A user unit runs `--restore` on session start, covering
-a hard reboot or a killed watchdog.
-
-Plus two safety properties:
-
-- **Self-healing on next launch.** Leftover state is restored *before* detection
-  runs, so a stranded 1× is never recorded as your "original" scale.
-- **Idempotent restore.** All three layers can fire in any order or
-  simultaneously. First one to succeed clears the state; the rest no-op.
-
-State lives on the host filesystem, not in the sandbox's private runtime dir,
-so the watchdog, the login unit, and your shell all see the same file.
-
-### Implementation notes
-
-- Scale is stored and replayed at **full precision**
-  (`1.3333333730697632`, not `1.333`). `gdctl` only accepts a scale its modes
-  actually support, and echoing back the exact double it reported avoids a
-  rejection on the restore path — the one failure you'd least want.
-- Detection prefers `gdctl show` (live state), falling back to
-  `monitors.xml` (saved config) for setups that have never opened the Displays
-  panel. Every logical monitor is captured, not just the primary one.
-- `gdctl set` **replaces** the whole configuration — a monitor left out of the
-  command is a monitor switched off. So every generated config lists every
-  monitor, and is checked with `gdctl set --verify` before being applied. If
-  verification fails, the game launches unmodified rather than gambling with
-  your display arrangement.
-- Restoring replays exact saved coordinates. Applying can't: at 1× each logical
-  monitor grows, so the old coordinates would overlap and be rejected. It
-  rebuilds the arrangement relationally (`--right-of` / `--below`) in the
-  original left-to-right or top-to-bottom order and lets mutter do the layout.
-- If a display is unplugged mid-game, the saved layout no longer applies. The
-  restore path falls back to replaying only the monitors still connected,
-  promoting a new primary if that one went away — a state file that can never
-  be applied would mean a desktop permanently stuck at 1×.
-- If anything is unavailable, the game still launches, unmodified. A failed
-  scale flip should never mean a failed game launch.
-- The state file is written to a sibling and renamed, so a reader sees the
-  whole old state or the whole new one — never a truncated scale. A partial
-  write here is worse than no state at all: `gdctl` rejects the bad value,
-  every restore layer fails identically, and the retry logic keeps you at 1×.
-- It is parsed as strict `key=value`, never sourced. The state directory is
-  writable by the sandboxed app being launched, and `--restore` runs on the
-  host from the login unit — sourcing it there would execute its contents
-  outside the sandbox at every session start. Unknown keys and malformed
-  values fail closed.
-
----
+`gamescale.sh` documents the rest inline — why scales are replayed at full
+precision, why applying is relational but restoring is absolute, and what
+happens if you unplug a display mid-game.
 
 ## Verifying it actually works
 
 The script running without errors and the game getting the right resolution are
-different claims. Check the game's own video settings — the display resolution
-should read your panel's native mode, not the overscaled one.
-
-For a claim that doesn't depend on a game's settings dialog, ask XWayland
-directly from inside the Steam sandbox, which is exactly the one a game sees:
+different claims.
 
 ```sh
+# what XWayland reports to the game — 2560x1600 under gamescale, not 3840x2400
 flatpak run --command=xrandr com.valvesoftware.Steam | grep '^Screen'
-```
 
-On a 2560×1600 panel at 133% this reports `current 3840 x 2400` — the
-overscaled framebuffer. Under `gamescale` it should read `2560 x 1600`. This is
-also the quickest way to check whether the problem in this README is one you
-actually have.
-
-That reports the screen, not what the game chose to do with it. For the game's
-own swapchain, use MangoHud:
-
-```
+# what the game actually renders at; the least ambiguous check there is
 MANGOHUD_CONFIG=fps,resolution gamescale %command%
+
+# the lock is load-bearing: 1 means held, which is what you want.
+# check the exit code, not the output — flock -n prints nothing either way
+flock -n ~/.local/state/gamescale/lock -c true; echo $?
+
+lsof ~/.local/state/gamescale/lock          # who holds it
+systemctl --user list-units 'gamescale-*'   # is the watchdog up
+
+# --doctor from inside the sandbox, which is where things actually break
+flatpak run --command=gamescale com.valvesoftware.Steam --doctor
 ```
 
-This is the least ambiguous check there is. A game honouring the reported mode
-and a game ignoring it look identical, and cost 2.25× apart.
+If that `flock` prints `0` while a game is running, the lock isn't being held
+through the launch chain and the watchdog could restore mid-game — worse than no
+watchdog. Set `GAMESCALE_NO_WATCH=1` and open an issue.
 
-Then test the lock, because it's the load-bearing part. While a game is
-running:
-
-```sh
-flock -n ~/.local/state/gamescale/lock -c true; echo $?   # want 1
-```
-
-Check the exit code, not the output — `flock -n` prints nothing whether it
-acquires the lock or not, so silence proves nothing. `1` means it could not
-acquire, which is what you want. `0` means the lock isn't being held through
-Steam's launch chain and the watchdog may restore mid-game — worse than no
-watchdog at all. Set `GAMESCALE_NO_WATCH=1` and open an issue.
-
-To see who actually holds it:
-
-```sh
-lsof ~/.local/state/gamescale/lock
-```
-
-And check the watchdog is actually up:
-
-```sh
-systemctl --user list-units 'gamescale-*'
-```
-
----
-
-## Recovering by hand
-
-If your desktop is stuck at 1×:
+## If your desktop is stuck at 1×
 
 ```sh
 gamescale --restore
 ```
 
-If the state file is gone too, set it directly:
+If the state file is gone too, set it by hand (`gdctl show` gives you the
+connector name and scale):
 
 ```sh
 gdctl set --logical-monitor --primary --monitor eDP-1 --scale 1.3333333730697632
@@ -448,13 +273,23 @@ gsettings reset org.gnome.desktop.interface text-scaling-factor
 gsettings reset org.gnome.desktop.interface cursor-size
 ```
 
-`gdctl show` will tell you your connector name and current scale.
-
----
-
 ## Requirements
 
 - GNOME 48+ on Wayland (`gdctl` ships with Mutter)
-- `flock` (util-linux) and `systemd-run` for the watchdog — optional; without
-  them it degrades to trap-only
+- `flock` and `systemd-run` for the watchdog — optional, degrades to trap-only
 - `xmllint` for the `monitors.xml` fallback — optional
+
+## Development
+
+```sh
+shellcheck -S style gamescale.sh install.sh test/*.sh
+./test/detect_test.sh      # gdctl output parsing, connector-name edge cases
+./test/state_test.sh       # state format, and the exact config gdctl is sent
+./test/watchdog_test.sh    # restore after SIGKILL, and no restore before it
+```
+
+The suites stub `gdctl`, `gsettings` and `systemd-run` on `PATH` and drive the
+real script end to end, so what's under test is the shipped code. No display is
+touched. `test/watchdog_test.sh` takes about 15 seconds; it kills a fake game
+with `SIGKILL` so the trap never runs, then asserts the watchdog restored
+anyway.
