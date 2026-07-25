@@ -8,43 +8,69 @@
 #
 #   ./install.sh
 #
-# Installs the script, grants Flatpak Steam the four things it needs, installs
-# the login reconcile unit, and runs --doctor. Everything it does is printed and
-# individually reversible; nothing needs root.
+# Installs the script, grants the launchers you name what they need to reach
+# the host session, installs the login reconcile unit, and runs --doctor.
+# Everything it does is printed and individually reversible; nothing needs root.
 #
-# To remove all of it:
+#   --platform NAME...   which launchers to grant (default: steam)
+#   --uninstall          remove everything it installed
+#   --dry-run            print every action, take none
 #
-#   ./install.sh --uninstall
-#   curl -fsSL .../install.sh | sh -s -- --uninstall
+# Known platform names, and any flatpak app id works too:
 #
-# Add --dry-run to either to see every action without taking any. Worth doing
-# before the install: it grants a sandbox you care about four permissions.
+#   steam     com.valvesoftware.Steam
+#   faugus    io.github.Faugus.faugus-launcher
+#   lutris    net.lutris.Lutris
+#   heroic    com.heroicgameslauncher.hgl
+#   bottles   com.usebottles.bottles
+#   all       every one of the above that is installed
+#
+#   ./install.sh --platform steam faugus
+#   curl -fsSL .../install.sh | sh -s -- --platform steam faugus
+#
+# Granting is deliberately explicit. Handing an app portal access to your host
+# session is the most consequential thing this script does, so it is never done
+# to an app you did not name.
 #
 # ENV
 #   GAMESCALE_REF          tag to install               (default: latest release)
 #   GAMESCALE_BINDIR       install location             (default: ~/.local/bin)
-#   GAMESCALE_NO_FLATPAK   1 to skip the Steam overrides
+#   GAMESCALE_NO_FLATPAK   1 to skip launcher grants entirely
 #   GAMESCALE_NO_UNIT      1 to skip the login reconcile unit
 
 set -eu
 
 REPO="proto-cool/gamescale"
-STEAM_ID="com.valvesoftware.Steam"
 STATE_DIR="$HOME/.local/state/gamescale"
 
-MODE="install"; DRY=0
-for arg in "$@"; do
-    case "$arg" in
-        --uninstall|-u) MODE="uninstall" ;;
-        --dry-run|-n)   DRY=1 ;;
-        --help|-h)      sed -n '2,30p' "$0" | sed 's/^# \?//'; exit 0 ;;
-        *)              printf 'unknown option: %s\n' "$arg" >&2; exit 2 ;;
+# name:app-id — the app id is what everything below actually uses.
+KNOWN="steam:com.valvesoftware.Steam \
+faugus:io.github.Faugus.faugus-launcher \
+lutris:net.lutris.Lutris \
+heroic:com.heroicgameslauncher.hgl \
+bottles:com.usebottles.bottles"
+
+MODE="install"; DRY=0; PLATFORMS=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --uninstall|-u) MODE="uninstall"; shift ;;
+        --dry-run|-n)   DRY=1; shift ;;
+        --platform|-p)
+            shift
+            # Consume every following value that isn't another option.
+            while [ $# -gt 0 ]; do
+                case "$1" in -*) break ;; esac
+                PLATFORMS="$PLATFORMS $1"
+                shift
+            done
+            ;;
+        --help|-h)      sed -n '2,40p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *)              printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
 
 say()  { printf '\033[1m::\033[0m %s\n' "$*"; }
-# Confirmation of something that actually happened — silent during a dry run,
-# where act() has already printed what would have happened.
 note() { [ "$DRY" = 1 ] || say "$@"; }
 warn() { printf '\033[33m!!\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31mxx\033[0m %s\n' "$*" >&2; exit 1; }
@@ -55,9 +81,39 @@ act() {
     "$@"
 }
 
+known_ids()   { for p in $KNOWN; do printf '%s ' "${p#*:}"; done; }
+name_for()    { for p in $KNOWN; do [ "${p#*:}" = "$1" ] && { printf '%s' "${p%%:*}"; return; }; done
+                printf '%s' "$1"; }
+
+# A name from the table, or any app id (anything containing a dot).
+resolve_platform() {
+    case "$1" in *.*) printf '%s' "$1"; return 0 ;; esac
+    for p in $KNOWN; do
+        [ "${p%%:*}" = "$1" ] && { printf '%s' "${p#*:}"; return 0; }
+    done
+    return 1
+}
+
+installed() { command -v flatpak >/dev/null 2>&1 && flatpak info "$1" >/dev/null 2>&1; }
+
+APPS=""
+[ -n "$PLATFORMS" ] || PLATFORMS="steam"
+case " $PLATFORMS " in
+    *" all "*)
+        PLATFORMS=""
+        for id in $(known_ids); do installed "$id" && PLATFORMS="$PLATFORMS $(name_for "$id")"; done
+        [ -n "$PLATFORMS" ] || warn "no known launchers installed"
+        ;;
+esac
+for p in $PLATFORMS; do
+    id=$(resolve_platform "$p") \
+        || die "unknown platform '$p' — known: $(for k in $KNOWN; do printf '%s ' "${k%%:*}"; done)or a flatpak app id"
+    APPS="$APPS $id"
+done
+
 # Where the binary lives. Uninstall has to find an install that used a custom
 # GAMESCALE_BINDIR without being told again, so look for it rather than
-# assuming: the variable, then PATH, then the read-only grant we gave Steam,
+# assuming: the variable, then PATH, then a read-only grant we gave a launcher,
 # then the default.
 find_bindir() {
     if [ -n "${GAMESCALE_BINDIR:-}" ]; then printf '%s' "$GAMESCALE_BINDIR"; return; fi
@@ -66,12 +122,14 @@ find_bindir() {
     if [ -n "$found" ]; then dirname "$found"; return; fi
 
     if command -v flatpak >/dev/null 2>&1; then
-        granted=$(flatpak override --user --show "$STEAM_ID" 2>/dev/null \
-            | sed -n 's/^filesystems=//p' | tr ';' '\n' \
-            | sed -n 's/:ro$//p' | head -n 1)
-        if [ -n "$granted" ] && [ -e "$granted/gamescale" ]; then
-            printf '%s' "$granted"; return
-        fi
+        for id in $(known_ids); do
+            granted=$(flatpak override --user --show "$id" 2>/dev/null \
+                | sed -n 's/^filesystems=//p' | tr ';' '\n' \
+                | sed -n 's/:ro$//p' | head -n 1)
+            if [ -n "$granted" ] && [ -e "$granted/gamescale" ]; then
+                printf '%s' "$granted"; return
+            fi
+        done
     fi
 
     printf '%s' "$HOME/.local/bin"
@@ -90,14 +148,13 @@ TARGET="$BINDIR/gamescale"
 #   filesystems=!/home/you/.local/bin;    org.freedesktop.Flatpak=none
 #   unset-environment=PATH;               PATH=
 #
-# and that last pair is destructive — Steam's own PATH is set in its manifest,
-# so unsetting it doesn't restore a default, it drops /app/bin (Steam's own
-# binaries) and /app/utils/bin (the Utility extension point). gamescope and
-# MangoHud are unaffected: Steam's launcher adds their Vulkan extension
-# directories itself at startup, independent of PATH.
+# and that last pair is destructive — an app's PATH is set in its manifest, so
+# unsetting it doesn't restore a default, it drops /app/bin and /app/utils/bin.
+# (gamescope and MangoHud survive that: launchers add their Vulkan extension
+# directories themselves at startup, independent of PATH.)
 #
 # --reset is the only clean removal, and it removes EVERYTHING, including
-# grants that have nothing to do with gamescale. So reset only when the app's
+# grants that have nothing to do with gamescale. So reset only when an app's
 # overrides contain nothing but ours, and otherwise print exactly what to
 # remove and leave it alone.
 # ---------------------------------------------------------------------------
@@ -123,34 +180,39 @@ if [ "$MODE" = "uninstall" ]; then
         note "removed gamescale-reconcile.service"
     fi
 
-    if command -v flatpak >/dev/null 2>&1 && flatpak info "$STEAM_ID" >/dev/null 2>&1; then
-        overrides=$(flatpak override --user --show "$STEAM_ID" 2>/dev/null || true)
-        # Every line we are responsible for. Anything else in there is the
-        # user's, and their overrides are not ours to delete.
-        foreign=$(printf '%s\n' "$overrides" \
-            | grep -v '^\[' \
-            | grep -v '^[[:space:]]*$' \
-            | grep -v '^filesystems=' \
-            | grep -v '^org\.freedesktop\.Flatpak=talk$' \
-            | grep -v '^PATH=' || true)
-        fs_foreign=$(printf '%s\n' "$overrides" \
-            | sed -n 's/^filesystems=//p' | tr ';' '\n' \
-            | grep -v '^[[:space:]]*$' \
-            | grep -v "^$BINDIR:ro$" \
-            | grep -v "^$STATE_DIR:create$" || true)
+    # Clean every known launcher, not just the ones named: you should not have
+    # to remember which you granted months ago.
+    if command -v flatpak >/dev/null 2>&1; then
+        for id in $(known_ids) $APPS; do
+            installed "$id" || continue
+            overrides=$(flatpak override --user --show "$id" 2>/dev/null || true)
+            [ -n "$overrides" ] || continue
 
-        if [ -z "$foreign" ] && [ -z "$fs_foreign" ]; then
-            act flatpak override --user --reset "$STEAM_ID"
-            note "removed Steam overrides"
-        else
-            warn "Steam has overrides that gamescale did not add:"
-            printf '%s\n' "$foreign" "$fs_foreign" | grep -v '^$' | sed 's/^/     /' >&2
-            warn "leaving them alone. To remove only gamescale's, edit:"
-            warn "  $HOME/.local/share/flatpak/overrides/$STEAM_ID"
-            warn "and drop $BINDIR, $STATE_DIR, org.freedesktop.Flatpak and the"
-            warn "trailing $BINDIR from PATH. Do NOT use --nofilesystem or"
-            warn "--unset-env: they add denials and wipe Steam's PATH."
-        fi
+            foreign=$(printf '%s\n' "$overrides" \
+                | grep -v '^\[' \
+                | grep -v '^[[:space:]]*$' \
+                | grep -v '^filesystems=' \
+                | grep -v '^org\.freedesktop\.Flatpak=talk$' \
+                | grep -v '^PATH=' || true)
+            fs_foreign=$(printf '%s\n' "$overrides" \
+                | sed -n 's/^filesystems=//p' | tr ';' '\n' \
+                | grep -v '^[[:space:]]*$' \
+                | grep -v "^$BINDIR:ro$" \
+                | grep -v "^$STATE_DIR:create$" || true)
+
+            if [ -z "$foreign" ] && [ -z "$fs_foreign" ]; then
+                act flatpak override --user --reset "$id"
+                note "removed $(name_for "$id") overrides"
+            else
+                warn "$(name_for "$id") has overrides that gamescale did not add:"
+                printf '%s\n' "$foreign" "$fs_foreign" | grep -v '^$' | sed 's/^/     /' >&2
+                warn "leaving them alone. To remove only gamescale's, edit:"
+                warn "  $HOME/.local/share/flatpak/overrides/$id"
+                warn "and drop $BINDIR, $STATE_DIR, org.freedesktop.Flatpak and the"
+                warn "trailing $BINDIR from PATH. Do NOT use --nofilesystem or"
+                warn "--unset-env: they add denials and wipe the app's PATH."
+            fi
+        done
     fi
 
     act rm -f "$TARGET"
@@ -161,7 +223,7 @@ if [ "$MODE" = "uninstall" ]; then
     if [ "$DRY" = 1 ]; then
         say "dry run finished — nothing was changed"
     else
-        say "gamescale is gone. Remove 'gamescale' from your Steam launch options."
+        say "gamescale is gone. Remove it from your launch options."
     fi
     exit 0
 fi
@@ -215,26 +277,29 @@ case ":$PATH:" in
 esac
 
 # ---------------------------------------------------------------------------
-# Flatpak Steam. Four grants: read the script, share state, reach the host
-# session, resolve the bare name. --user overrides apply to system-installed
-# apps too, so this never needs root.
+# Launcher grants. Up to four: read the script, share state, reach the host
+# session, resolve the bare name. An app with home access already covers the
+# first two, so it only needs the last two. --user overrides apply to
+# system-installed apps too, so this never needs root.
 # ---------------------------------------------------------------------------
 
-if [ "${GAMESCALE_NO_FLATPAK:-0}" = "1" ]; then
-    say "skipping Flatpak Steam overrides (GAMESCALE_NO_FLATPAK=1)"
-elif ! command -v flatpak >/dev/null 2>&1; then
-    say "no flatpak on this system — skipping Steam overrides"
-elif ! flatpak info "$STEAM_ID" >/dev/null 2>&1; then
-    say "Flatpak Steam is not installed — skipping Steam overrides"
-    say "if you install it later, re-run this script"
-else
-    # Read the live sandbox PATH rather than assuming it. --env=PATH replaces
-    # the value outright, so starting from whatever Steam ships today is the
-    # only way to avoid pinning a stale one — and re-running stays idempotent.
-    sandbox_path=$(flatpak run --command=sh "$STEAM_ID" -c 'printf %s "$PATH"' 2>/dev/null) || sandbox_path=""
+app_has_home() {
+    flatpak info --show-permissions "$1" 2>/dev/null \
+        | sed -n 's/^filesystems=//p' | tr ';' '\n' \
+        | grep -qE '^(home|host)$'
+}
+
+grant_app() {
+    app="$1"
+
+    # Read the app's live sandbox PATH rather than assuming it — every launcher
+    # has a different one, and --env=PATH replaces the value outright. Starting
+    # from whatever the app ships today is the only way to avoid pinning a
+    # stale one, and it keeps re-running idempotent.
+    sandbox_path=$(flatpak run --command=sh "$app" -c 'printf %s "$PATH"' 2>/dev/null) || sandbox_path=""
     if [ -z "$sandbox_path" ]; then
         sandbox_path="/app/bin:/app/utils/bin:/usr/bin"
-        warn "could not read Steam's sandbox PATH; assuming $sandbox_path"
+        warn "could not read $(name_for "$app")'s sandbox PATH; assuming $sandbox_path"
     fi
 
     case ":$sandbox_path:" in
@@ -242,15 +307,46 @@ else
         *)             new_path="$sandbox_path:$BINDIR" ;;
     esac
 
-    act flatpak override --user \
-        --filesystem="$BINDIR:ro" \
-        --filesystem="$STATE_DIR:create" \
-        --talk-name=org.freedesktop.Flatpak \
-        --env=PATH="$new_path" \
-        "$STEAM_ID" \
-        || die "flatpak override failed"
+    if app_has_home "$app"; then
+        act flatpak override --user \
+            --talk-name=org.freedesktop.Flatpak \
+            --env=PATH="$new_path" \
+            "$app" || die "flatpak override failed for $app"
+        note "granted $(name_for "$app"): host portal, PATH (already had home access)"
+    else
+        act flatpak override --user \
+            --filesystem="$BINDIR:ro" \
+            --filesystem="$STATE_DIR:create" \
+            --talk-name=org.freedesktop.Flatpak \
+            --env=PATH="$new_path" \
+            "$app" || die "flatpak override failed for $app"
+        note "granted $(name_for "$app"): $BINDIR (ro), $STATE_DIR (rw), host portal, PATH"
+    fi
+}
 
-    note "granted Steam: $BINDIR (ro), $STATE_DIR (rw), host portal, PATH"
+if [ "${GAMESCALE_NO_FLATPAK:-0}" = "1" ]; then
+    say "skipping launcher grants (GAMESCALE_NO_FLATPAK=1)"
+elif ! command -v flatpak >/dev/null 2>&1; then
+    say "no flatpak on this system — skipping launcher grants"
+else
+    for id in $APPS; do
+        if installed "$id"; then
+            grant_app "$id"
+        else
+            say "$(name_for "$id") is not installed — skipping"
+        fi
+    done
+
+    # Name what else is here, but never grant it unasked.
+    others=""
+    for id in $(known_ids); do
+        case " $APPS " in *" $id "*) continue ;; esac
+        installed "$id" && others="$others $(name_for "$id")"
+    done
+    if [ -n "$others" ]; then
+        say "also installed, not granted:$others"
+        say "  to include:  ./install.sh --platform$( for p in $PLATFORMS; do printf ' %s' "$p"; done)$others"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -272,7 +368,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Verify. Doctor exits 0 regardless; the checkmarks are the report.
+# Verify. Doctor exits non-zero if a check failed; the checkmarks are the report.
 # ---------------------------------------------------------------------------
 
 echo
@@ -281,6 +377,13 @@ if [ "$DRY" = 1 ]; then
 else
     "$TARGET" --doctor || true
     echo
-    say "Steam launch options:  gamescale %command%"
-    say "restart Steam for the new permissions to take effect"
+    for id in $APPS; do
+        case "$id" in
+            com.valvesoftware.Steam)
+                say "Steam launch options:  gamescale %command%" ;;
+            *)
+                say "$(name_for "$id"): set gamescale as the wrapper/prefix for your game" ;;
+        esac
+    done
+    say "restart the launchers above for the new permissions to take effect"
 fi
