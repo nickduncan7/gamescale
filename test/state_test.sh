@@ -100,8 +100,11 @@ want "restore: primary replayed at saved scale" \
 want "restore: secondary replayed too"      "--monitor HDMI-1 --scale 1.3333333730697632"
 want "restore: exact coordinates"           "--x 1920 --y 0"
 wantnot "restore: not relational"           "--right-of"
-[[ -f "$STATE" ]] && bad "restore: state cleared on success" \
-                  || ok "restore: state cleared on success"
+if [[ -f "$STATE" ]]; then
+    bad "restore: state cleared on success"
+else
+    ok "restore: state cleared on success"
+fi
 
 # --- v1 state files still restore ----------------------------------------
 # Someone upgrading between v1.0.1 and v1.1.0 mid-game has one of these on
@@ -109,8 +112,11 @@ wantnot "restore: not relational"           "--right-of"
 printf 'connector=eDP-1\nscale=1.5\ntext_scale=1.0\ncursor_size=24\n' > "$STATE"
 run --restore
 want "v1 state: still replayed" "--primary --monitor eDP-1 --scale 1.5"
-[[ -f "$STATE" ]] && bad "v1 state: cleared on success" \
-                  || ok "v1 state: cleared on success"
+if [[ -f "$STATE" ]]; then
+    bad "v1 state: cleared on success"
+else
+    ok "v1 state: cleared on success"
+fi
 
 # --- malformed input fails closed ----------------------------------------
 reject() {
@@ -125,6 +131,8 @@ reject() {
     fi
 }
 
+# Unexpanded on purpose: the point is that the parser never expands it either.
+# shellcheck disable=SC2016
 reject "command substitution"  'version=2\nmonitor=eDP-1;$(touch /tmp/x);yes;0;0;normal\n'
 reject "unknown key"           'version=2\nmonitor=eDP-1;1.5;yes;0;0;normal\nevil=1\n'
 reject "future version"        'version=3\nmonitor=eDP-1;1.5;yes;0;0;normal\n'
