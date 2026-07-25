@@ -11,10 +11,10 @@ GNOME/Mutter on Wayland. Works with Flatpak Steam and other Flatpak launchers.
 > and this one changes your display configuration — read the script before you
 > run it. It isn't unvalidated, though: the numbers below were measured on a
 > Lenovo Legion Pro 7i (2560×1600 at 133%) running Fedora Silverblue 44, GNOME
-> 50.3 and Flatpak Steam, and CI runs shellcheck plus three test suites — 47
-> assertions over the display-state reader, the state format, and the
-> restore-after-SIGKILL path — on every push. Other GNOME versions and other
-> hardware are less certain; issues welcome.
+> 50.3 and Flatpak Steam, and CI runs shellcheck plus four test suites — 111
+> assertions over reading the display, the exact configuration written back, the
+> state format, and the restore-after-SIGKILL path — on every push. Other GNOME
+> versions and other hardware are less certain; issues welcome.
 
 ## The problem
 
@@ -106,7 +106,7 @@ needs no root, and is safe to re-run. Downloads are checked against the
 | `--platform NAME...` | which launchers to grant (default `steam`) |
 | `--dry-run` | print every action, take none |
 | `--uninstall` | remove everything it installed |
-| `GAMESCALE_REF=v1.2.0` | pin a version |
+| `GAMESCALE_REF=v1.4.0` | pin a version |
 | `GAMESCALE_BINDIR=...` | install somewhere else |
 | `GAMESCALE_NO_FLATPAK=1` | skip launcher grants |
 | `GAMESCALE_NO_UNIT=1` | skip the login reconcile unit |
@@ -152,10 +152,21 @@ flatpak override --user \
 
 The sandbox otherwise can't see the script, can't write shared state, can't
 reach the host session, and can't resolve the bare name.
-`--talk-name=org.freedesktop.Flatpak` is what `flatpak-spawn --host` rides on;
-without it the script passes your game through unmodified. `--env=PATH`
-*replaces* the sandbox PATH rather than extending it, so `--doctor` checks the
-stock entries are still there. Restart the launcher afterwards.
+
+**Be clear about what the third one costs.**
+`--talk-name=org.freedesktop.Flatpak` is what `flatpak-spawn --host` rides on,
+and it lets the app ask the portal to run arbitrary commands *outside* the
+sandbox. That is not a narrow capability: it effectively ends the launcher's
+isolation from your host session, for the launcher and for anything it runs,
+including games and their shader compilers. The `:ro` and `:create` filesystem
+grants are reachable through it too, so read them as tidiness, not containment.
+This is the price of reaching `gsettings` and mutter from inside a sandbox, and
+it is the most consequential thing the installer does. If that trade isn't one
+you want, run your games unsandboxed — gamescale needs no grants at all outside
+Flatpak — or skip this grant and accept that games launch unmodified.
+
+`--env=PATH` *replaces* the sandbox PATH rather than extending it, so `--doctor`
+checks the stock entries are still there. Restart the launcher afterwards.
 
 Uninstalling won't touch overrides you added yourself: `flatpak override
 --reset` is the only clean removal and it removes everything, so if there's
@@ -180,7 +191,8 @@ Anywhere else: `gamescale -- /path/to/game`.
 | `--doctor` | full dependency and permission check |
 | `--restore` | put the display back from a stranded state file |
 | `--install-unit` | install the login reconcile service |
-| `--version` | which release this is |
+| `--version`, `-V` | which release this is |
+| `--help`, `-h` | the full commentary from the top of the script |
 
 | | |
 |---|---|
@@ -206,6 +218,23 @@ which is sufficient.
    outlives the sandbox.
 3. **Login reconcile** — a user unit runs `--restore` at session start, covering
    a hard reboot or a killed watchdog.
+
+Two limits on the watchdog worth knowing, because both are deliberate:
+
+- **It gives up after 12 hours** rather than living forever. Reaching that
+  ceiling means the game is *still running*, so it exits without touching
+  anything — restoring there would revert the desktop under a live game and
+  delete the record the real exit depends on. The trap and the login unit still
+  cover you. `GAMESCALE_WATCHDOG_TIMEOUT` changes the ceiling.
+- **It only acts on the state its own run wrote.** Each run tags the state file
+  with an id and passes it to its watchdog. Without that, a watchdog finishing
+  its grace period could restore the *next* game's state — reverting a game that
+  had just started and deleting its record.
+
+**One game at a time.** Two games mean two owners of one display, so whoever
+holds the lock owns it: a second launch that finds the lock taken says so and
+runs your game unmodified rather than reverting the first one's display and
+deleting its state.
 
 The descriptor isn't inherited by the game itself: under pressure-vessel the
 game is started through the portal by `steam-runtime-launch-client`, so it isn't
@@ -240,8 +269,10 @@ different claims.
 # what XWayland reports to the game — 2560x1600 under gamescale, not 3840x2400
 flatpak run --command=xrandr com.valvesoftware.Steam | grep '^Screen'
 
-# what the game actually renders at; the least ambiguous check there is
-MANGOHUD_CONFIG=fps,resolution gamescale %command%
+# what the game actually renders at; the least ambiguous check there is.
+# MANGOHUD_CONFIG only configures it — MANGOHUD=1 is what turns it on (or use
+# Steam's MangoHud toggle). As a Steam launch option, not a terminal command:
+MANGOHUD=1 MANGOHUD_CONFIG=fps,resolution gamescale %command%
 
 # the lock is load-bearing: 1 means held, which is what you want.
 # check the exit code, not the output — flock -n prints nothing either way
@@ -275,26 +306,45 @@ gsettings reset org.gnome.desktop.interface cursor-size
 
 ## Requirements
 
-- GNOME 48+ on Wayland (`gdctl` ships with Mutter)
-- `python3` with PyGObject, to read the display state. Not a new dependency:
-  `gdctl` is itself a python3 + PyGObject script, so any system with `gdctl` has
-  both already
+- GNOME on Wayland with fractional scaling on
+- `python3` with PyGObject (`python3-gi` on Debian/Ubuntu, `python3-gobject-base`
+  on Fedora) — this is what talks to mutter
 - `flock` and `systemd-run` for the watchdog — optional, degrades to trap-only
 
-## How the display state is read
+**Which GNOME versions.** Tested on 50.3, which is the only version any of this
+has run on. 48 and 49 are expected to work and reports are welcome. Since 1.4.0
+nothing here needs `gdctl`, so there is no longer a reason it *couldn't* work on
+46 and 47 — the D-Bus interface it uses predates the CLI by years — but that is
+untested, so the honest answer is "try it and tell me". `--doctor` will say
+whether the pieces are reachable before you launch anything.
 
-Detection asks mutter over `org.gnome.Mutter.DisplayConfig.GetCurrentState` —
-the interface `gdctl` itself calls — and gets position, scale, transform,
-primary and connectors back as typed values. Applying still goes through `gdctl
-set`, whose flags are a stable contract.
+## How the display configuration is read and written
 
-It used to scrape `gdctl show`, which is output meant for humans: no stability
-contract, drawn with box glyphs, and connector names recovered by anchoring past
-them. A GNOME release that reflowed that tree would have broken detection
-silently. One casualty worth naming: `gdctl` numbers transforms in an order its
-own names don't suggest — 6 is `flipped-270` and 7 is `flipped-180`, the reverse
-of mutter's enum order — so a reader that formatted the raw value the obvious way
-would rotate two of the eight configurations wrongly on restore.
+Both directions go to mutter over `org.gnome.Mutter.DisplayConfig`:
+`GetCurrentState` to read, `ApplyMonitorsConfig` to write. Position, scale,
+transform, primary and connectors are typed values, and nothing is parsed out of
+text.
+
+Reading used to scrape `gdctl show`, which is output meant for humans: no
+stability contract, drawn with box glyphs, connector names recovered by anchoring
+past them. A GNOME release that reflowed that tree would have broken detection
+silently — and silently is the problem, because gamescale fails safe, so a broken
+parser looks like a game that launched fine and stayed blurry.
+
+Writing directly means owning two things `gdctl` did: choosing a mode id per
+monitor (always the one you are already on), and computing logical positions,
+because the D-Bus call takes absolute coordinates and has no `--right-of`. Two
+notes on that arithmetic, since it can only be wrong in ways mutter refuses:
+
+- Every configuration is **verified before it is applied**, so getting it wrong
+  costs a refused config and an unmodified game launch, not your layout.
+- At 1× a logical monitor *is* its mode, so the default path does no division and
+  cannot round. Only a fractional `GAMESCALE_SCALE` reaches that arithmetic.
+
+One trap worth naming: `gdctl` numbers transforms in an order its own names don't
+suggest — 6 is `flipped-270` and 7 is `flipped-180`, the reverse of mutter's enum
+order — and the width/height swap follows the same numbering. Formatting the raw
+value the obvious way would rotate two of the eight configurations wrongly.
 
 If reading fails for any reason, the game launches unmodified. Restoring doesn't
 depend on it at all: `--restore` replays the state file and never re-reads the
@@ -304,15 +354,24 @@ display, so a broken reader can decline to scale you but can't strand you at 1×
 
 ```sh
 shellcheck -S style gamescale.sh install.sh test/*.sh
-./test/detect_test.py      # the reader, against synthetic mutter replies
-./test/state_test.sh       # state format, and the exact config gdctl is sent
+./test/detect_test.py      # reading, against synthetic mutter replies
+./test/apply_test.py       # the exact configuration written back to mutter
+./test/state_test.sh       # state format, and the records built from it
 ./test/watchdog_test.sh    # restore after SIGKILL, and no restore before it
+./install.sh --dry-run     # what CI smoke-tests the installer with
 ```
 
-No display is touched by any of them. `detect_test.py` extracts the reader out
-of `gamescale.sh` and runs it against real `GLib.Variant`s of GetCurrentState's
-signature, so the shipped reader is what's under test and a wrong signature
-fails there rather than at runtime. The shell suites stub `gdctl`, `gsettings`,
-`systemd-run` and `python3` on `PATH` and drive the real script end to end.
-`watchdog_test.sh` takes about 15 seconds; it kills a fake game with `SIGKILL`
-so the trap never runs, then asserts the watchdog restored anyway.
+No display is touched by any of them. The Python suites extract the display
+program out of `gamescale.sh` and run it against real `GLib.Variant`s of
+GetCurrentState's signature, so the shipped code is what's under test, a wrong
+signature fails there rather than at runtime, and `apply_test.py` can assert the
+exact payload — including that every configuration is verified before it is
+applied, and that nothing is applied when verification fails.
+
+The shell suites stub `python3`, `gsettings` and `systemd-run` on `PATH` and
+drive the real script end to end; `state_test.sh`'s stub also refuses
+configurations naming a disconnected monitor, the way mutter does, so the
+unplugged-display fallback is exercised rather than assumed. `watchdog_test.sh`
+takes about 25 seconds: it kills a fake game with `SIGKILL` so the trap never
+runs, then asserts the watchdog restored anyway — and that it does *not* restore
+while the game is alive, after timing out, or for a run that isn't its own.

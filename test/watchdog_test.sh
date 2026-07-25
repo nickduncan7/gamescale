@@ -3,7 +3,7 @@
 # Watchdog resilience tests — the claim the whole design rests on: a game that
 # dies without running the trap still gets the display back.
 #
-# Drives the real script end to end with gdctl, gsettings and systemd-run
+# Drives the real script end to end with python3, gsettings and systemd-run
 # stubbed on PATH, so the watchdog under test is the shipped one, started the
 # way the shipped code starts it. Nothing touches a real display.
 #
@@ -25,7 +25,7 @@ WORK=$(mktemp -d); export WORK
 
 STUBS="$WORK/bin"
 mkdir -p "$STUBS"
-LOG="$WORK/gdctl.log"
+LOG="$WORK/python3.log"
 RUNLOG="$WORK/systemd-run.log"
 FAKEHOME=""; STATE=""; LOCK=""; CASE=0
 
@@ -48,18 +48,15 @@ fresh_home() {
 cleanup() { pkill -9 -f "$WORK" 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT
 
-cat > "$STUBS/gdctl" <<'STUB'
-#!/bin/sh
-echo "$*" >> "$GDCTL_LOG"
-exit 0
-STUB
-
-# Stands in for the python reader; detect_test.py covers the real one. Consumes
-# stdin because the script pipes the reader source into it.
+# Stands in for the display program; detect_test.py and apply_test.py cover the
+# real one. Records what it was asked to do, and consumes stdin because the
+# script pipes the program's source into it.
 cat > "$STUBS/python3" <<'STUB'
 #!/bin/sh
 cat >/dev/null
-printf '%s\n' "$DETECT_FIXTURE"
+echo "$*" >> "$PY_LOG"
+[ "${1:-}" = "-" ] && shift
+[ "${1:-read}" = "read" ] && printf '%s\n' "$DETECT_FIXTURE"
 exit 0
 STUB
 
@@ -89,24 +86,24 @@ setsid "$@" >/dev/null 2>&1 &
 exit 0
 STUB
 
-chmod +x "$STUBS/gdctl" "$STUBS/gsettings" "$STUBS/systemd-run" "$STUBS/python3"
+chmod +x "$STUBS/gsettings" "$STUBS/systemd-run" "$STUBS/python3"
 
 FIXTURE=$(printf 'eDP-1\t1.3333333730697632\tyes\t0\t0\tnormal')
 
 PASS=0; FAIL=0
 ok()  { printf '  \033[32mok\033[0m   %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1));
-        printf '        gdctl log: %s\n' "$(tr '\n' '|' < "$LOG")"; }
+        printf '        display log: %s\n' "$(tr '\n' '|' < "$LOG")"; }
 
 gamescale() {
-    DETECT_FIXTURE="$FIXTURE" GDCTL_LOG="$LOG" SYSTEMD_RUN_LOG="$RUNLOG" \
+    DETECT_FIXTURE="$FIXTURE" PY_LOG="$LOG" SYSTEMD_RUN_LOG="$RUNLOG" \
     HOME="$FAKEHOME" PATH="$STUBS:$PATH" \
         bash "$SCRIPT" "$@"
 }
 
 # The restore is recognisable by the saved scale coming back; applying only
-# ever sends --scale 1.
-restored() { grep -q -- '--scale 1.3333333730697632' "$LOG"; }
+# ever sends scale 1.
+restored() { grep -q -- 'eDP-1;1.3333333730697632;yes' "$LOG"; }
 
 game_started() { [[ -f "$WORK/game.started" ]]; }
 
@@ -154,7 +151,7 @@ else
     bad "game never launched"
 fi
 
-if grep -q -- '--scale 1 ' "$LOG"; then
+if grep -q -- 'eDP-1;1;yes' "$LOG"; then
     ok "applied 1x before launching"
 else
     bad "never applied 1x"
@@ -221,7 +218,7 @@ cursor_size=24
 monitor=eDP-1;1.5;yes;0;0;normal
 EOF
 gamescale --restore >/dev/null 2>&1
-if grep -q -- '--scale 1.5' "$LOG"; then
+if grep -q -- 'eDP-1;1.5;yes' "$LOG"; then
     ok "--restore replays a stranded state file"
 else
     bad "--restore did not replay the stranded state"
@@ -240,6 +237,105 @@ else
 fi
 kill -9 "$runner" 2>/dev/null
 wait "$runner" 2>/dev/null
+
+# --- a watchdog only acts on the state its own run wrote --------------------
+#
+# Quit game A: its trap restores and clears state, and A's watchdog wakes and
+# enters its 2s grace period. Launch game B inside that window and B writes its
+# own state. Without a run token the waking watchdog sees a state file, assumes
+# it is A's, and restores it — reverting B's display mid-launch and deleting the
+# record B depends on. A silent, total failure.
+fresh_home
+cat > "$STATE" <<'EOF'
+version=2
+text_scale=1.0
+cursor_size=24
+run=run-B
+monitor=eDP-1;1.5;yes;0;0;normal
+EOF
+DETECT_FIXTURE="$FIXTURE" PY_LOG="$LOG" HOME="$FAKEHOME" PATH="$STUBS:$PATH" \
+    bash "$SCRIPT" --watchdog run-A >/dev/null 2>&1
+if grep -q -- 'eDP-1;1.5;yes' "$LOG"; then
+    bad "watchdog restored another run's state"
+else
+    ok "watchdog leaves another run's state alone"
+fi
+if [[ -f "$STATE" ]]; then
+    ok "watchdog keeps another run's state file"
+else
+    bad "watchdog deleted another run's state file"
+fi
+
+# The same watchdog, for the run that actually wrote the file, must still act.
+fresh_home
+cat > "$STATE" <<'EOF'
+version=2
+text_scale=1.0
+cursor_size=24
+run=run-A
+monitor=eDP-1;1.5;yes;0;0;normal
+EOF
+DETECT_FIXTURE="$FIXTURE" PY_LOG="$LOG" HOME="$FAKEHOME" PATH="$STUBS:$PATH" \
+    bash "$SCRIPT" --watchdog run-A >/dev/null 2>&1
+if grep -q -- 'eDP-1;1.5;yes' "$LOG"; then
+    ok "watchdog restores its own run's state"
+else
+    bad "watchdog ignored its own run's state"
+fi
+
+# A state file from before run tokens existed still gets restored, rather than
+# being stranded because it cannot prove ownership.
+fresh_home
+cat > "$STATE" <<'EOF'
+version=2
+text_scale=1.0
+cursor_size=24
+monitor=eDP-1;1.5;yes;0;0;normal
+EOF
+DETECT_FIXTURE="$FIXTURE" PY_LOG="$LOG" HOME="$FAKEHOME" PATH="$STUBS:$PATH" \
+    bash "$SCRIPT" --watchdog run-A >/dev/null 2>&1
+if grep -q -- 'eDP-1;1.5;yes' "$LOG"; then
+    ok "an untagged state file is still restored"
+else
+    bad "an untagged state file was stranded"
+fi
+
+# --- timing out means the game is STILL RUNNING, so do not restore ----------
+# The ceiling exists so the unit cannot live forever. Restoring on the way out
+# would yank the desktop out from under a game that is still going, and clear
+# the state so the real exit had nothing left to put back.
+fresh_home
+cat > "$STATE" <<'EOF'
+version=2
+text_scale=1.0
+cursor_size=24
+run=run-A
+monitor=eDP-1;1.5;yes;0;0;normal
+EOF
+# Something else holds the lock for longer than the watchdog will wait.
+flock -x "$LOCK" -c 'sleep 6' &
+holder=$!
+sleep 0.5
+DETECT_FIXTURE="$FIXTURE" PY_LOG="$LOG" HOME="$FAKEHOME" PATH="$STUBS:$PATH" \
+GAMESCALE_WATCHDOG_TIMEOUT=1 \
+    bash "$SCRIPT" --watchdog run-A >/dev/null 2>&1
+rc=$?
+if [[ $rc -ne 0 ]]; then
+    ok "watchdog that timed out reports failure"
+else
+    bad "watchdog that timed out claimed success"
+fi
+if grep -q -- 'eDP-1;1.5;yes' "$LOG"; then
+    bad "watchdog restored while the game still held the lock"
+else
+    ok "watchdog does not restore after timing out"
+fi
+if [[ -f "$STATE" ]]; then
+    ok "watchdog keeps the state after timing out"
+else
+    bad "watchdog cleared the state after timing out"
+fi
+kill -9 "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
 
 echo
 echo "  $PASS passed, $FAIL failed"
