@@ -1,0 +1,69 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags-ignore: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # shellcheck at its strictest severity, with nothing suppressed globally. The
+  # two disables in the tree are line-scoped and explain themselves.
+  #
+  # No shfmt: the source is hand-aligned into columns in several places
+  # (mode tables, doctor checks, the awk parser) and a formatter would flatten
+  # that. Alignment here is load-bearing for reading it, so it isn't delegated.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          shellcheck --version
+          shellcheck -S style gamescale.sh install.sh test/*.sh
+      - name: syntax check every script
+        run: |
+          bash -n gamescale.sh
+          sh -n install.sh
+          for t in test/*.sh; do bash -n "$t"; done
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The suites stub gdctl, gsettings and systemd-run on PATH; no display,
+      # no GNOME, no flatpak involved. flock/setsid/pkill are the only real
+      # dependencies, and the watchdog suite skips itself without them.
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends util-linux procps
+      - name: monitor detection
+        run: ./test/detect_test.sh
+      - name: state format and generated configuration
+        run: ./test/state_test.sh
+      - name: watchdog resilience
+        run: ./test/watchdog_test.sh
+        timeout-minutes: 3
+
+  # The installed script is the only record of which release it came from, so a
+  # tag whose VERSION disagrees with it would be unfalsifiable in a bug report.
+  # Checked on every run, not just at release, so it can't drift unnoticed.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: VERSION is present and well-formed
+        run: |
+          v=$(sed -n 's/^readonly VERSION="\(.*\)"$/\1/p' gamescale.sh)
+          [ -n "$v" ] || { echo "no VERSION in gamescale.sh"; exit 1; }
+          echo "$v" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "VERSION '$v' is not x.y.z"; exit 1; }
+          reported=$(bash gamescale.sh --version)
+          [ "$reported" = "gamescale $v" ] \
+            || { echo "--version said '$reported', expected 'gamescale $v'"; exit 1; }
+          echo "VERSION $v"
