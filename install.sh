@@ -57,6 +57,40 @@ bottles:com.usebottles.bottles"
 
 MODE="install"; DRY=0; PLATFORMS=""
 
+# True only when $0 is this file on disk. Piped to sh, $0 is "sh", so anything
+# that reads the script itself has to check first — and a file merely NAMED sh
+# in the current directory must not qualify, hence the marker rather than -r.
+running_from_file() {
+    [ -r "$0" ] && head -n 3 "$0" 2>/dev/null | grep -q 'gamescale installer'
+}
+
+# The header comment doubles as --help when it can be read. Stops at the first
+# non-comment line rather than a hardcoded range, which silently truncated the
+# environment table as the header grew.
+usage() {
+    if running_from_file; then
+        awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"
+        return
+    fi
+    cat <<'USAGE'
+gamescale installer
+
+  --platform NAME...   which launchers to grant (default: steam)
+                       steam faugus lutris heroic bottles all, or a flatpak id
+  --uninstall          remove everything it installed
+  --dry-run            print every action, take none
+  --help               this text
+
+  GAMESCALE_REF        tag to install               (default: latest release)
+  GAMESCALE_BINDIR     install location             (default: ~/.local/bin)
+  GAMESCALE_NO_FLATPAK 1 to skip launcher grants entirely
+  GAMESCALE_NO_UNIT    1 to skip the login reconcile unit
+  GAMESCALE_NO_VERIFY  1 to install without checking the checksum
+
+Full documentation: https://github.com/proto-cool/gamescale
+USAGE
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --uninstall|-u) MODE="uninstall"; shift ;;
@@ -70,7 +104,7 @@ while [ $# -gt 0 ]; do
                 shift
             done
             ;;
-        --help|-h)      sed -n '2,40p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        --help|-h)      usage; exit 0 ;;
         *)              printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -188,17 +222,41 @@ if [ "$MODE" = "uninstall" ]; then
     # Clean every known launcher, not just the ones named: you should not have
     # to remember which you granted months ago.
     if command -v flatpak >/dev/null 2>&1; then
+        seen=""
         for id in $(known_ids) $APPS; do
+            case " $seen " in *" $id "*) continue ;; esac
+            seen="$seen $id"
             installed "$id" || continue
             overrides=$(flatpak override --user --show "$id" 2>/dev/null || true)
             [ -n "$overrides" ] || continue
+
+            # Positive evidence that WE granted this app something. Without it,
+            # an app carrying only the user's own PATH override read as
+            # "nothing but ours" and got --reset — destroying a grant gamescale
+            # never made, which is the exact thing the comment above forbids.
+            ours=0
+            case "$overrides" in
+                *"$BINDIR:ro"*)        ours=1 ;;
+            esac
+            case "$overrides" in
+                *"$STATE_DIR:create"*) ours=1 ;;
+            esac
+            # Our PATH edit always ends in the bindir. One that doesn't is the
+            # user's, and is foreign no matter what else is here.
+            path_is_ours=0
+            case "$(printf '%s\n' "$overrides" | sed -n 's/^PATH=//p')" in
+                *":$BINDIR") path_is_ours=1; ours=1 ;;
+            esac
+            [ "$ours" = 1 ] || continue
 
             foreign=$(printf '%s\n' "$overrides" \
                 | grep -v '^\[' \
                 | grep -v '^[[:space:]]*$' \
                 | grep -v '^filesystems=' \
-                | grep -v '^org\.freedesktop\.Flatpak=talk$' \
-                | grep -v '^PATH=' || true)
+                | grep -v '^org\.freedesktop\.Flatpak=talk$' || true)
+            if [ "$path_is_ours" = 1 ]; then
+                foreign=$(printf '%s\n' "$foreign" | grep -v '^PATH=' || true)
+            fi
             fs_foreign=$(printf '%s\n' "$overrides" \
                 | sed -n 's/^filesystems=//p' | tr ';' '\n' \
                 | grep -v '^[[:space:]]*$' \
@@ -257,7 +315,15 @@ sha256_of() {
     fi
 }
 
-self_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || self_dir=""
+# A checkout wins only when this installer is itself a file in that checkout.
+# Piped to sh, $0 is "sh" and dirname is ".", which turned "the checkout next to
+# me" into "whatever gamescale.sh happens to be in your current directory" — and
+# that path skips the download, the tag, and the checksum entirely. Any
+# world-writable cwd was enough to substitute the script.
+self_dir=""
+if running_from_file; then
+    self_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || self_dir=""
+fi
 if [ -n "$self_dir" ] && [ -r "$self_dir/gamescale.sh" ]; then
     SRC="$self_dir/gamescale.sh"
     say "installing from checkout: $SRC"
@@ -340,9 +406,16 @@ grant_app() {
     # has a different one, and --env=PATH replaces the value outright. Starting
     # from whatever the app ships today is the only way to avoid pinning a
     # stale one, and it keeps re-running idempotent.
-    # $PATH is deliberately unexpanded here: it is evaluated inside the sandbox.
-    # shellcheck disable=SC2016
-    sandbox_path=$(flatpak run --command=sh "$app" -c 'printf %s "$PATH"' 2>/dev/null) || sandbox_path=""
+    if [ "$DRY" = 1 ]; then
+        # Reading it means starting the sandbox, which is a side effect, and
+        # --dry-run promises none. Show the documented default instead.
+        printf '\033[36m--\033[0m would: read %s sandbox PATH\n' "$(name_for "$app")"
+        sandbox_path="/app/bin:/app/utils/bin:/usr/bin"
+    else
+        # $PATH is deliberately unexpanded here: it is evaluated in the sandbox.
+        # shellcheck disable=SC2016
+        sandbox_path=$(flatpak run --command=sh "$app" -c 'printf %s "$PATH"' 2>/dev/null) || sandbox_path=""
+    fi
     if [ -z "$sandbox_path" ]; then
         sandbox_path="/app/bin:/app/utils/bin:/usr/bin"
         warn "could not read $(name_for "$app")'s sandbox PATH; assuming $sandbox_path"

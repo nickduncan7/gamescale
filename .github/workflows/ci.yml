@@ -48,11 +48,28 @@ jobs:
             util-linux procps python3-gi gir1.2-glib-2.0
       - name: monitor detection
         run: ./test/detect_test.py
+      - name: applying
+        run: ./test/apply_test.py
       - name: state format and generated configuration
         run: ./test/state_test.sh
+        timeout-minutes: 3
       - name: watchdog resilience
         run: ./test/watchdog_test.sh
         timeout-minutes: 3
+      # install.sh was linted but never run, which is how a broken --help and a
+      # checksum bypass both shipped. These exercise it without touching the
+      # system: no launcher grants, no unit, nothing installed.
+      - name: installer smoke test
+        env:
+          GAMESCALE_NO_FLATPAK: '1'
+          GAMESCALE_NO_UNIT: '1'
+        run: |
+          ./install.sh --dry-run
+          ./install.sh --uninstall --dry-run
+          ./install.sh --help | grep -q GAMESCALE_NO_VERIFY
+          # Piped is how the README tells people to run it, and $0 is not a file
+          # then — every path that reads the script itself has to cope.
+          cat install.sh | sh -s -- --help | grep -q GAMESCALE_NO_VERIFY
 
   # The installed script is the only record of which release it came from, so a
   # tag whose VERSION disagrees with it would be unfalsifiable in a bug report.

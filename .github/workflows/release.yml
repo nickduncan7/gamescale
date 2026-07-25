@@ -50,11 +50,17 @@ jobs:
       - name: shellcheck
         run: shellcheck -S style gamescale.sh install.sh test/*.sh
       - name: tests
+        env:
+          GAMESCALE_NO_FLATPAK: '1'
+          GAMESCALE_NO_UNIT: '1'
         run: |
           ./test/detect_test.py
+          ./test/apply_test.py
           ./test/state_test.sh
           ./test/watchdog_test.sh
-        timeout-minutes: 5
+          ./install.sh --dry-run
+          ./install.sh --uninstall --dry-run
+        timeout-minutes: 8
 
       # What install.sh verifies its download against. Without this asset the
       # installer refuses to install at all, so it is not optional.

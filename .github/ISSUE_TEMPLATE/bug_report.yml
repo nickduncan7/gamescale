@@ -1,0 +1,86 @@
+name: Bug report
+description: Something about the display behaviour is wrong
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Display bugs are almost impossible to act on without the two command
+        outputs below — they say which GNOME, which monitors, which scales, and
+        which parts gamescale can actually reach. Please don't skip them.
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: gamescale --doctor
+      description: >-
+        Run it from a terminal. If you use Flatpak Steam, please also paste the
+        sandboxed run, since that is where things usually break —
+        `flatpak run --command=gamescale com.valvesoftware.Steam --doctor`
+      render: text
+      placeholder: |
+        $ gamescale --doctor
+    validations:
+      required: true
+
+  - type: input
+    id: gnome
+    attributes:
+      label: GNOME version
+      description: "`gnome-shell --version`"
+      placeholder: GNOME Shell 50.3
+    validations:
+      required: true
+
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution
+      placeholder: Fedora Silverblue 44 / Ubuntu 24.04 / Arch
+    validations:
+      required: true
+
+  - type: dropdown
+    id: launcher
+    attributes:
+      label: How are you launching the game?
+      options:
+        - Flatpak Steam
+        - Steam (deb/rpm/other native package)
+        - Steam (snap)
+        - Lutris
+        - Heroic
+        - Bottles
+        - Faugus
+        - Directly, from a terminal
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+      description: >-
+        If the display was left wrong, say whether `gamescale --restore` fixed
+        it — that distinguishes a failed restore from a failed detection.
+    validations:
+      required: true
+
+  - type: textarea
+    id: game
+    attributes:
+      label: Game, and its display settings
+      description: >-
+        Which game, whether it offers a resolution picker or is
+        borderless-fullscreen only, and what resolution it reports. If you have
+        MangoHud, `MANGOHUD=1 MANGOHUD_CONFIG=fps,resolution gamescale %command%`
+        shows what the game actually renders at.
+
+  - type: textarea
+    id: debug
+    attributes:
+      label: Verbose output (optional, very useful)
+      description: "`GAMESCALE_DEBUG=1 gamescale -- <your game>`, or set it in the
+        launch options and check the launcher's log."
+      render: text
