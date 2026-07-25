@@ -175,10 +175,15 @@ feq()    { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a - b < 1e-9 && b - a < 1e-9)
 # gdctl set replaces the whole configuration, so a monitor left out of the
 # command is a monitor switched off. Everything detected here must be replayed.
 #
-# Scales are full-precision doubles, stored and replayed verbatim, so gdctl
-# accepts them as supported values on restore. Python's repr of a double is its
-# shortest round-tripping form, so 1.3333333730697632 survives without any
-# number ever being parsed out of text.
+# Scales are full-precision doubles, stored and replayed verbatim. Python's repr
+# of a double is its shortest round-tripping form, so 1.3333333730697632 survives
+# without any number ever being parsed out of text.
+#
+# Measured, not assumed: gdctl is looser than that on input — it accepted 1.33
+# and even 1.7 on this panel, rejecting only 3.7, past the largest supported
+# scale. So replaying verbatim is not what keeps a restore from being refused;
+# it is what keeps you from being handed a neighbouring scale instead of the one
+# you were on, and it costs nothing to be exact.
 # ---------------------------------------------------------------------------
 
 # Parallel arrays, one entry per logical monitor. MON_CONNS holds a
