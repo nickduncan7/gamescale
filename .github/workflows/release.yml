@@ -58,6 +58,8 @@ jobs:
           ./test/apply_test.py
           ./test/state_test.sh
           ./test/watchdog_test.sh
+          ./test/sandbox_test.sh
+          ./test/install_test.sh
           ./install.sh --dry-run
           ./install.sh --uninstall --dry-run
         timeout-minutes: 8

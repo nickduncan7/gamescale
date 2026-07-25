@@ -39,6 +39,7 @@ fresh_home() {
     FAKEHOME="$WORK/home$CASE"
     STATE="$FAKEHOME/.local/state/gamescale/state"
     LOCK="$FAKEHOME/.local/state/gamescale/lock"
+    RUNF="$FAKEHOME/.local/state/gamescale/run"
     mkdir -p "$FAKEHOME/.local/state/gamescale"
     : > "$LOG"; : > "$RUNLOG"
 }
@@ -48,45 +49,9 @@ fresh_home() {
 cleanup() { pkill -9 -f "$WORK" 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT
 
-# Stands in for the display program; detect_test.py and apply_test.py cover the
-# real one. Records what it was asked to do, and consumes stdin because the
-# script pipes the program's source into it.
-cat > "$STUBS/python3" <<'STUB'
-#!/bin/sh
-cat >/dev/null
-echo "$*" >> "$PY_LOG"
-[ "${1:-}" = "-" ] && shift
-[ "${1:-read}" = "read" ] && printf '%s\n' "$DETECT_FIXTURE"
-exit 0
-STUB
-
-cat > "$STUBS/gsettings" <<'STUB'
-#!/bin/sh
-[ "$1" = "set" ] && exit 0
-case "$3" in
-    text-scaling-factor) echo "1.0" ;;
-    cursor-size)         echo "24" ;;
-esac
-STUB
-
-# Stands in for systemd's job supervision: drop the flags the real invocation
-# passes and run the rest detached, so it survives the process that started it.
-# setsid is what makes that true here, the way "systemd owns the unit" makes it
-# true in production.
-cat > "$STUBS/systemd-run" <<'STUB'
-#!/bin/sh
-echo "$*" >> "$SYSTEMD_RUN_LOG"
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --user|--collect|--quiet|--unit=*) shift ;;
-        *) break ;;
-    esac
-done
-setsid "$@" >/dev/null 2>&1 &
-exit 0
-STUB
-
-chmod +x "$STUBS/gsettings" "$STUBS/systemd-run" "$STUBS/python3"
+# shellcheck source=test/stubs.sh
+. "$(cd "$(dirname "$0")" && pwd)/stubs.sh"
+make_stubs "$STUBS"
 
 FIXTURE=$(printf 'eDP-1\t1.3333333730697632\tyes\t0\t0\tnormal')
 
@@ -250,9 +215,9 @@ cat > "$STATE" <<'EOF'
 version=2
 text_scale=1.0
 cursor_size=24
-run=run-B
 monitor=eDP-1;1.5;yes;0;0;normal
 EOF
+echo run-B > "$RUNF"
 DETECT_FIXTURE="$FIXTURE" PY_LOG="$LOG" HOME="$FAKEHOME" PATH="$STUBS:$PATH" \
     bash "$SCRIPT" --watchdog run-A >/dev/null 2>&1
 if grep -q -- 'eDP-1;1.5;yes' "$LOG"; then
@@ -272,9 +237,9 @@ cat > "$STATE" <<'EOF'
 version=2
 text_scale=1.0
 cursor_size=24
-run=run-A
 monitor=eDP-1;1.5;yes;0;0;normal
 EOF
+echo run-A > "$RUNF"
 DETECT_FIXTURE="$FIXTURE" PY_LOG="$LOG" HOME="$FAKEHOME" PATH="$STUBS:$PATH" \
     bash "$SCRIPT" --watchdog run-A >/dev/null 2>&1
 if grep -q -- 'eDP-1;1.5;yes' "$LOG"; then
@@ -283,8 +248,26 @@ else
     bad "watchdog ignored its own run's state"
 fi
 
-# A state file from before run tokens existed still gets restored, rather than
-# being stranded because it cannot prove ownership.
+# A 1.4.0 state file carried the token inside itself. It must still restore, and
+# the key must not be mistaken for corruption.
+fresh_home
+cat > "$STATE" <<'EOF'
+version=2
+text_scale=1.0
+cursor_size=24
+run=run-Z
+monitor=eDP-1;1.5;yes;0;0;normal
+EOF
+DETECT_FIXTURE="$FIXTURE" PY_LOG="$LOG" HOME="$FAKEHOME" PATH="$STUBS:$PATH" \
+    bash "$SCRIPT" --watchdog run-A >/dev/null 2>&1
+if grep -q -- 'eDP-1;1.5;yes' "$LOG"; then
+    ok "a 1.4.0 state file still restores"
+else
+    bad "a 1.4.0 state file was refused"
+fi
+
+# A state file with no token at all still gets restored, rather than being
+# stranded because it cannot prove ownership.
 fresh_home
 cat > "$STATE" <<'EOF'
 version=2
@@ -309,9 +292,9 @@ cat > "$STATE" <<'EOF'
 version=2
 text_scale=1.0
 cursor_size=24
-run=run-A
 monitor=eDP-1;1.5;yes;0;0;normal
 EOF
+echo run-A > "$RUNF"
 # Something else holds the lock for longer than the watchdog will wait.
 flock -x "$LOCK" -c 'sleep 6' &
 holder=$!

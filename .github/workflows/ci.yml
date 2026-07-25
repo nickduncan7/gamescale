@@ -52,9 +52,17 @@ jobs:
         run: ./test/apply_test.py
       - name: state format and generated configuration
         run: ./test/state_test.sh
-        timeout-minutes: 3
+        timeout-minutes: 4
       - name: watchdog resilience
         run: ./test/watchdog_test.sh
+        timeout-minutes: 4
+      # The sandboxed branch is the one every Flatpak user takes, and until 1.5.0
+      # no suite could reach it.
+      - name: sandboxed branch and doctor
+        run: ./test/sandbox_test.sh
+        timeout-minutes: 3
+      - name: installer
+        run: ./test/install_test.sh
         timeout-minutes: 3
       # install.sh was linted but never run, which is how a broken --help and a
       # checksum bypass both shipped. These exercise it without touching the

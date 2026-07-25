@@ -42,6 +42,24 @@ t.equal("verify refused -> exit 2", r.code, 2)
 r = h.run(["verify", "eDP-1;1;yes;0;0;normal"], h.reply(ONE, [h.logical("eDP-1")]))
 t.equal("verify alone never applies", r.methods, [h.VERIFY])
 
+# The gate is only a gate if it checks the same thing. A mutant that packed only
+# on the apply call — leaving verify to approve the un-packed, overlapping layout
+# — passed every other assertion here: mutter would then refuse what verify had
+# just blessed, and every multi-monitor user would silently get "launching
+# unmodified" forever.
+r = h.run(["apply", "--pack", "eDP-1;1;yes;0;0;normal", "HDMI-1;1;no;1920;0;normal"],
+          h.reply([h.monitor("eDP-1"), h.monitor("HDMI-1")],
+                  [h.logical("eDP-1"), h.logical("HDMI-1", primary=False, x=1920)]))
+t.equal("verify checks exactly what gets applied",
+        r.applied[0]["logical"], r.applied[1]["logical"])
+t.equal("and its properties too",
+        r.applied[0]["properties"], r.applied[1]["properties"])
+
+# Reading and applying both go to mutter; only records go to stdout, and only
+# from `read`. apply_records does not redirect stdout, so anything printed here
+# would land in the caller's output.
+t.equal("applying prints nothing on stdout", r.lines, [])
+
 # --- the serial is mutter's, so a display change under us is caught --------
 r = h.run(["apply", "eDP-1;1;yes;0;0;normal"],
           h.reply(ONE, [h.logical("eDP-1")], serial=41))

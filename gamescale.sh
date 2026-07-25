@@ -58,7 +58,7 @@ set -uo pipefail
 # display behaviour is unactionable without it: the script is copied to
 # ~/.local/bin, so nothing else on the system records which release it came
 # from. Release CI refuses to publish a tag that disagrees with this.
-readonly VERSION="1.4.0"
+readonly VERSION="1.5.0"
 
 readonly IFACE_SCHEMA="org.gnome.desktop.interface"
 # 12h ceiling. On reaching it the watchdog gives up WITHOUT restoring, because
@@ -118,9 +118,14 @@ give_up() {
 # on the host and need the org.freedesktop.Flatpak portal to reach.
 # ---------------------------------------------------------------------------
 
+# Overridable purely so tests can drive the sandboxed branch; nothing else has a
+# reason to move it. Untested, this was the only code path no suite could reach —
+# and it is the path every Flatpak user takes.
+readonly FLATPAK_INFO="${GAMESCALE_FLATPAK_INFO:-/.flatpak-info}"
+
 IN_FLATPAK=0
 HOST=()
-if [[ -f /.flatpak-info ]]; then
+if [[ -f "$FLATPAK_INFO" ]]; then
     IN_FLATPAK=1
     if command -v flatpak-spawn >/dev/null 2>&1; then
         HOST=(flatpak-spawn --host)
@@ -143,6 +148,13 @@ HOST_HOME=$(host_capture 'printf "%s" "$HOME"')
 readonly STATE_DIR="${HOST_HOME}/.local/state/gamescale"
 readonly STATE_FILE="${STATE_DIR}/state"
 readonly LOCK_FILE="${STATE_DIR}/lock"
+# The run token lives beside the state rather than inside it. Putting it in the
+# state file changed a format that older copies parse strictly, and a 1.3.0
+# script meeting a 1.4.0 state file refused it and left the display at 1x — a
+# reachable state, since --install-unit bakes an absolute path and reinstalling
+# elsewhere leaves the login unit pointing at the old script. A sibling file is
+# invisible to every parser, past and future.
+readonly RUN_FILE="${STATE_DIR}/run"
 
 # ---------------------------------------------------------------------------
 # Float helpers — awk, not bc, because awk is always present.
@@ -553,9 +565,10 @@ apply_records() {
 state_write() {
     local text_scale="$1" cursor_size="$2" run="$3" i
     host mkdir -p "$STATE_DIR" 2>/dev/null
+    printf '%s\n' "$run" | host sh -c "umask 077; cat > '$RUN_FILE'" || return 1
     {
-        printf 'version=2\ntext_scale=%s\ncursor_size=%s\nrun=%s\n' \
-            "$text_scale" "$cursor_size" "$run"
+        printf 'version=2\ntext_scale=%s\ncursor_size=%s\n' \
+            "$text_scale" "$cursor_size"
         for ((i = 0; i < ${#MON_CONNS[@]}; i++)); do
             printf 'monitor=%s;%s;%s;%s;%s;%s\n' \
                 "${MON_CONNS[i]}" "${MON_SCALE[i]}" "${MON_PRIM[i]}" \
@@ -567,7 +580,8 @@ state_write() {
 
 state_read()   { host cat "$STATE_FILE" 2>/dev/null; }
 state_exists() { host test -r "$STATE_FILE"; }
-state_clear()  { host rm -f "$STATE_FILE"; }
+state_clear()  { host rm -f "$STATE_FILE" "$RUN_FILE"; }
+run_owner()    { host cat "$RUN_FILE" 2>/dev/null; }
 
 is_number()    { [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]; }
 is_integer()   { [[ "$1" =~ ^[0-9]+$ ]]; }
@@ -623,7 +637,7 @@ state_parse() {
     [[ -n "$blob" ]] || return 1
 
     MON_CONNS=(); MON_SCALE=(); MON_PRIM=(); MON_X=(); MON_Y=(); MON_TRANSFORM=()
-    text_scale=""; cursor_size=""; run_id=""
+    text_scale=""; cursor_size=""
     SEEN_CONNS=" "
 
     while IFS= read -r line; do
@@ -639,7 +653,9 @@ state_parse() {
             # Which run wrote this. The watchdog compares it against its own
             # before restoring, so a watchdog still finishing its grace period
             # cannot act on the NEXT game's state file.
-            run)         is_token     "$value" && run_id="$value"     || return 1 ;;
+            # Written by 1.4.0 only. Accepted so its state files still restore;
+            # the token lives in a sibling file now.
+            run)         is_token     "$value"                        || return 1 ;;
             *) return 1 ;;
         esac
     done <<<"$blob"
@@ -794,10 +810,9 @@ if [[ "$MODE" == "watchdog" ]]; then
         # above, the next game may already have started and written its own.
         # Restoring that one would revert a running game and delete the record
         # it depends on, so act only on state this watchdog was started for.
-        run_id=""
-        if [[ -n "$WATCH_RUN" ]] && state_parse && [[ -n "$run_id" ]] \
-           && [[ "$run_id" != "$WATCH_RUN" ]]; then
-            log "state belongs to run $run_id, not $WATCH_RUN; leaving it alone"
+        owner=$(run_owner)
+        if [[ -n "$WATCH_RUN" && -n "$owner" && "$owner" != "$WATCH_RUN" ]]; then
+            log "state belongs to run $owner, not $WATCH_RUN; leaving it alone"
             exit 0
         fi
         warn "game exited without restoring; watchdog cleaning up"
@@ -830,6 +845,9 @@ if [[ "$MODE" == "doctor" ]]; then
     DOCTOR_BAD=0
     ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
     bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; DOCTOR_BAD=$((DOCTOR_BAD + 1)); }
+    # A second line about the SAME failure. Calling bad() twice inflated the
+    # count, and the count is what the exit status and the summary report.
+    more() { printf '    %s\n' "$1"; }
     echo "gamescale $VERSION doctor"
     echo
     if [[ $IN_FLATPAK == 1 ]]; then
@@ -892,8 +910,8 @@ if [[ "$MODE" == "doctor" ]]; then
         if display_config verify --pack "${RECORDS[@]}" 2>/dev/null; then
             ok "the ${GAME_SCALE}x layout for ${#MON_CONNS[@]} monitor(s) verifies"
         else
-            bad "mutter rejects the ${GAME_SCALE}x layout for ${#MON_CONNS[@]} monitor(s);"
-            bad "  games will launch unmodified rather than risk your layout"
+            bad "mutter rejects the ${GAME_SCALE}x layout for ${#MON_CONNS[@]} monitor(s)"
+            more "games will launch unmodified rather than risk your layout"
         fi
     else
         bad "detection failed"
