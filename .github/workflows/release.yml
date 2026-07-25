@@ -50,9 +50,6 @@ jobs:
       - name: shellcheck
         run: shellcheck -S style gamescale.sh install.sh test/*.sh
       - name: tests
-        env:
-          GAMESCALE_NO_FLATPAK: '1'
-          GAMESCALE_NO_UNIT: '1'
         run: |
           ./test/detect_test.py
           ./test/apply_test.py
@@ -60,8 +57,8 @@ jobs:
           ./test/watchdog_test.sh
           ./test/sandbox_test.sh
           ./test/install_test.sh
-          ./install.sh --dry-run
-          ./install.sh --uninstall --dry-run
+          GAMESCALE_NO_FLATPAK=1 GAMESCALE_NO_UNIT=1 ./install.sh --dry-run
+          GAMESCALE_NO_FLATPAK=1 GAMESCALE_NO_UNIT=1 ./install.sh --uninstall --dry-run
         timeout-minutes: 8
 
       # What install.sh verifies its download against. Without this asset the
