@@ -42,18 +42,23 @@
 #
 #   gamescale --doctor          verify every moving part
 #   gamescale --install-unit    install the login reconcile service
+#   gamescale --version         print the installed version
 #
 #   Steam launch option:  gamescale %command%
 #
 # ENV
 #   GAMESCALE_SCALE     scale while playing        (default: 1)
-#   GAMESCALE_MONITOR   ignored since v1.1.0 — every monitor must reach 1x
-#                       before XWayland's global scale factor drops
 #   GAMESCALE_NO_FONT   1 to skip font/cursor compensation
 #   GAMESCALE_NO_WATCH  1 to skip the host watchdog (trap only)
 #   GAMESCALE_DEBUG     1 for verbose logging
 
 set -uo pipefail
+
+# Reported by --version, --status and --doctor, because a bug report about
+# display behaviour is unactionable without it: the script is copied to
+# ~/.local/bin, so nothing else on the system records which release it came
+# from. Release CI refuses to publish a tag that disagrees with this.
+readonly VERSION="1.2.0"
 
 readonly IFACE_SCHEMA="org.gnome.desktop.interface"
 readonly WATCHDOG_TIMEOUT=43200   # 12h ceiling; watchdog self-terminates after
@@ -83,6 +88,8 @@ case "${1:-}" in
     --watchdog)     MODE="watchdog"; shift ;;
     --doctor)       MODE="doctor";   shift ;;
     --install-unit) MODE="install";  shift ;;
+    # Answered before any dependency check, so it works on a broken install.
+    --version|-V)   printf 'gamescale %s\n' "$VERSION"; exit 0 ;;
     --help|-h)      awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' \
                         "$SELF"; exit 0 ;;
     --)             shift ;;
@@ -119,6 +126,8 @@ host_capture() { host sh -c "$1" 2>/dev/null; }
 
 # Absolute paths are identical inside and outside the sandbox for granted
 # directories, so resolve the host's HOME once and use it on both sides.
+# $HOME is deliberately unexpanded: it is evaluated on the host side.
+# shellcheck disable=SC2016
 HOST_HOME=$(host_capture 'printf "%s" "$HOME"')
 [[ -n "$HOST_HOME" ]] || HOST_HOME="$HOME"
 
@@ -265,14 +274,8 @@ detect_from_xml() {
     log "monitors.xml: $connector @ $scale"
 }
 
-detect() {
-    detect_from_gdctl || detect_from_xml || return 1
-    if [[ -n "${GAMESCALE_MONITOR:-}" ]]; then
-        warn "GAMESCALE_MONITOR is ignored since v1.1.0 — every monitor has to"
-        warn "reach 1x before XWayland's global scale factor drops"
-    fi
-    return 0
-}
+# Live state first, saved config as a fallback.
+detect() { detect_from_gdctl || detect_from_xml; }
 
 # The primary monitor's scale drives the font/cursor compensation, since that's
 # the display you'll be reading the desktop on.
@@ -609,22 +612,34 @@ if [[ "$MODE" == "doctor" ]]; then
     DOCTOR_BAD=0
     ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
     bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; DOCTOR_BAD=$((DOCTOR_BAD + 1)); }
-    echo "gamescale doctor"
+    echo "gamescale $VERSION doctor"
     echo
-    [[ $IN_FLATPAK == 1 ]] && ok "running sandboxed (flatpak-spawn present)" \
-                           || ok "running on the host"
-    [[ ${#MISSING[@]} -eq 0 ]] && ok "gdctl + gsettings reachable" \
-        || bad "unreachable: ${MISSING[*]}  →  needs --talk-name=org.freedesktop.Flatpak"
+    if [[ $IN_FLATPAK == 1 ]]; then
+        ok "running sandboxed (flatpak-spawn present)"
+    else
+        ok "running on the host"
+    fi
+    if [[ ${#MISSING[@]} -eq 0 ]]; then
+        ok "gdctl + gsettings reachable"
+    else
+        bad "unreachable: ${MISSING[*]}  →  needs --talk-name=org.freedesktop.Flatpak"
+    fi
     host mkdir -p "$STATE_DIR" 2>/dev/null
     if host sh -c "touch '$STATE_DIR/.probe' && rm -f '$STATE_DIR/.probe'" 2>/dev/null; then
         ok "state dir writable: $STATE_DIR"
     else
         bad "state dir NOT writable: $STATE_DIR  →  needs --filesystem=...:create"
     fi
-    [[ -w "$STATE_DIR" ]] 2>/dev/null && ok "state dir writable from this side too" \
-        || bad "state dir not directly writable here (watchdog lock needs this)"
-    [[ $CAN_WATCH == 1 ]] && ok "watchdog available (systemd-run + flock)" \
-                          || bad "watchdog unavailable — trap-only, less resilient"
+    if [[ -w "$STATE_DIR" ]]; then
+        ok "state dir writable from this side too"
+    else
+        bad "state dir not directly writable here (watchdog lock needs this)"
+    fi
+    if [[ $CAN_WATCH == 1 ]]; then
+        ok "watchdog available (systemd-run + flock)"
+    else
+        bad "watchdog unavailable — trap-only, less resilient"
+    fi
     # Bare-name invocation from the Steam launch options box rides on an
     # --env=PATH override, which REPLACES the sandbox PATH rather than
     # extending it — so a Steam update that adds a directory would be dropped.
@@ -658,7 +673,11 @@ if [[ "$MODE" == "doctor" ]]; then
     else
         bad "detection failed"
     fi
-    state_exists && bad "stale state present — run --restore" || ok "no stale state"
+    if state_exists; then
+        bad "stale state present — run --restore"
+    else
+        ok "no stale state"
+    fi
     # Installing is four independent steps and nothing makes them atomic, so a
     # run that died halfway leaves exactly this: some checks green, some red.
     # Re-running the installer is idempotent and fixes every one of them.
@@ -677,6 +696,7 @@ if [[ ${#MISSING[@]} -gt 0 && "$MODE" != "status" ]]; then
 fi
 
 if [[ "$MODE" == "status" ]]; then
+    echo "version:      $VERSION"
     echo "sandboxed:    $([[ $IN_FLATPAK == 1 ]] && echo yes || echo no)"
     if [[ ${#MISSING[@]} -gt 0 ]]; then
         echo "host access:  MISSING ${MISSING[*]}"
