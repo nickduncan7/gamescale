@@ -120,11 +120,39 @@ Please open an issue saying so.
 curl -fsSL https://raw.githubusercontent.com/proto-cool/gamescale/main/install.sh | sh
 ```
 
-Installs to `~/.local/bin/gamescale`, applies the Flatpak Steam grants below,
+Installs to `~/.local/bin/gamescale`, grants Flatpak Steam what it needs,
 installs the login reconcile unit, and runs `--doctor`. It prints every action,
 needs no root, and is safe to re-run. `GAMESCALE_NO_FLATPAK=1` or
 `GAMESCALE_NO_UNIT=1` to opt out of either half; `GAMESCALE_REF=v1.0.0` to pin
-a version.
+a version; `--dry-run` to see every action without taking any.
+
+### Other launchers
+
+Steam is the default. Name others with `--platform`:
+
+```sh
+./install.sh --platform steam faugus
+```
+
+| name | app id |
+|---|---|
+| `steam` | `com.valvesoftware.Steam` |
+| `faugus` | `io.github.Faugus.faugus-launcher` |
+| `lutris` | `net.lutris.Lutris` |
+| `heroic` | `com.heroicgameslauncher.hgl` |
+| `bottles` | `com.usebottles.bottles` |
+| `all` | every one of the above that is installed |
+
+Any flatpak app id works too. Each app's grants are computed from its own live
+sandbox `PATH`, which differs per launcher — Faugus carries MangoHud, gamescope
+and OBSVkCapture extension directories that Steam doesn't. An app that already
+has `home` access (Faugus does, Steam doesn't) needs only two of the four
+grants.
+
+The installer names other launchers it finds but never grants to one you didn't
+ask for. Handing an app portal access to your host session is the most
+consequential thing it does, and that shouldn't happen because a script noticed
+something was installed.
 
 If you'd rather not pipe a URL into a shell — reasonable, given this script
 asks for portal access to your session — clone and read it first:
