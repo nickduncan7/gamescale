@@ -3,6 +3,63 @@
 Dates are release dates. "Stranding" below means a desktop left at 1× scale,
 which is the failure this tool exists not to cause.
 
+## 1.5.0 — 2026-07-25
+
+Tests and seams. No new features: a mutation battery injected twenty regressions
+into 1.4.0 and **fifteen survived the whole suite**, so this release is about
+making the suite able to fail.
+
+### Fixed
+
+- `--doctor` counted one problem twice. The second line explaining a failure
+  called the failure counter again, so a single rejected layout reported "2
+  check(s) failed" — and that count is what the exit status and the summary are
+  built on. `--doctor` had no tests at all; it has 6 now.
+- The run token is written to a **sibling file** instead of into the state file.
+  1.4.0 added a `run=` key while still claiming `version=2`, so a 1.3.0 script
+  meeting a 1.4.0 state file refused it and left the display at 1×. That is
+  reachable: `--install-unit` bakes an absolute path, so reinstalling elsewhere
+  leaves the login unit running the older copy. The state format is now back to
+  what 1.3.0 writes, and both older shapes still restore.
+- One test of the concurrency guard was racy — it slept a fixed second and
+  assumed the first run held the lock, which on a slow runner fails for a tool
+  that is behaving correctly. It now polls for the lock.
+
+### Added
+
+- `GAMESCALE_FLATPAK_INFO`, so the sandboxed branch is reachable from a test. It
+  is chosen by the presence of `/.flatpak-info`, which meant the one code path
+  every Flatpak user takes was the one path no suite could exercise. A command
+  added without routing it through `host()` works on the developer's desktop and
+  never comes back inside the sandbox.
+- `test/stubs.sh`, shared by every shell suite, whose stubs can be made to fail:
+  any exit status from the display program, a chosen `gsettings` key that refuses
+  to be set, and a logged `flatpak-spawn`. This is what makes the following
+  testable at all, and every one of them was a surviving mutant:
+  - font and cursor compensation, in both directions, and `GAMESCALE_NO_FONT`
+  - the partial-restore branch, where the scale comes back but the font does not
+  - every give-up path: a refused layout, an unwritable state directory, and a
+    leftover state file that will not restore — all of which must still launch
+    the game, and must not scale on top of a failed restore
+  - `GAMESCALE_SCALE` reaching the configuration at all
+- `test/sandbox_test.sh` — 17 assertions on the sandboxed branch and `--doctor`.
+- `test/install_test.sh` — 29 assertions on the installer: the exact grant argv
+  (a dropped `--talk-name` means nothing can ever be restored; an extra app is a
+  security regression), that an app with `home` access gets no filesystem grants,
+  that the sandbox `PATH` is extended rather than replaced and never doubled on
+  re-runs, that denial flags are never used, the reset-versus-warn decision on
+  three override shapes, that a checksum mismatch installs nothing, that piping
+  the installer ignores the working directory, and that `--uninstall` restores a
+  stranded display before deleting the tool.
+- The state file is now asserted as a literal, including mode 0600. Nothing read
+  one back before, and a mutant that recorded only the first monitor survived
+  everything — on two monitors that means restore switches the other display off.
+- `apply_test.py` asserts that verify checks the *same* payload that gets
+  applied. A mutant that packed only on the apply call passed all 44 previous
+  assertions, which would have made mutter refuse what verify had just approved.
+
+Assertions: 111 to 180.
+
 ## 1.4.0 — 2026-07-25
 
 Reads *and* writes the display configuration over

@@ -25,49 +25,16 @@ trap 'rm -rf "$WORK"' EXIT
 STUBS="$WORK/bin"; FAKEHOME="$WORK/home"
 mkdir -p "$STUBS" "$FAKEHOME/.local/state/gamescale"
 STATE="$FAKEHOME/.local/state/gamescale/state"
+LOCK="$FAKEHOME/.local/state/gamescale/lock"
+RUNF="$FAKEHOME/.local/state/gamescale/run"
 LOG="$WORK/python3.log"
 
 # Records every invocation of the display program, and answers `read` with the
 # fixture. The program itself arrives on stdin, so the stub has to consume it or
 # the writer gets EPIPE.
-# Stands in for the display program, and rejects what mutter would reject: a
-# configuration naming a connector that is not present. That is what makes the
-# unplugged-monitor fallback testable — without it every apply "succeeds" and
-# the retry path is never entered.
-cat > "$STUBS/python3" <<'STUB'
-#!/bin/sh
-cat >/dev/null
-echo "$*" >> "$PY_LOG"
-[ "${1:-}" = "-" ] && shift
-cmd="${1:-read}"
-if [ "$cmd" = "read" ]; then
-    printf '%s\n' "$DETECT_FIXTURE"
-    exit 0
-fi
-shift
-present=" $(printf '%s\n' "$DETECT_FIXTURE" | cut -f1 | tr ',' ' ' | tr '\n' ' ') "
-for rec in "$@"; do
-    case "$rec" in --*) continue ;; esac
-    for conn in $(printf '%s' "$rec" | cut -d';' -f1 | tr ',' ' '); do
-        case "$present" in
-            *" $conn "*) ;;
-            *) exit 2 ;;
-        esac
-    done
-done
-exit 0
-STUB
-
-cat > "$STUBS/gsettings" <<'STUB'
-#!/bin/sh
-[ "$1" = "set" ] && exit 0
-case "$3" in
-    text-scaling-factor) echo "1.0" ;;
-    cursor-size)         echo "24" ;;
-esac
-STUB
-
-chmod +x "$STUBS/gsettings" "$STUBS/python3"
+# shellcheck source=test/stubs.sh
+. "$(cd "$(dirname "$0")" && pwd)/stubs.sh"
+make_stubs "$STUBS"
 
 # conns \t scale \t primary \t x \t y \t transform, one per logical monitor.
 # HDMI-1 first and non-primary, so nothing can pass by assuming the primary
@@ -78,12 +45,17 @@ TWO_MONITORS=$(printf '%s\n' \
 
 PASS=0; FAIL=0
 
-run() {  # run MODE-ARGS... ; returns exit status, fills $LOG
-    : > "$LOG"
-    DETECT_FIXTURE="$TWO_MONITORS" PY_LOG="$LOG" \
-    GAMESCALE_NO_WATCH=1 HOME="$FAKEHOME" PATH="$STUBS:$PATH" \
-        bash "$SCRIPT" "$@" >/dev/null 2>&1
+GS_LOG="$WORK/gsettings.log"
+
+run() {  # run MODE-ARGS... ; returns exit status, fills $LOG and $GS_LOG
+    : > "$LOG"; : > "$GS_LOG"
+    env DETECT_FIXTURE="$TWO_MONITORS" PY_LOG="$LOG" GS_LOG="$GS_LOG" \
+        GAMESCALE_NO_WATCH=1 HOME="$FAKEHOME" PATH="$STUBS:$PATH" "$@" \
+        >/dev/null 2>&1
 }
+
+# run, plus whatever extra environment a case needs, e.g. PY_FAIL_RC=2.
+gs() { run bash "$SCRIPT" "$@"; }
 
 # What was handed to the display program, minus the `read` calls. A full run
 # logs two: the 1x apply on the way in, and the restore on the way out.
@@ -103,7 +75,7 @@ echo
 # --- apply: every monitor goes to 1x -------------------------------------
 # The whole point of v1.1.0. Scaling only the primary leaves XWayland's global
 # factor at 2 and costs MORE pixels than not running at all.
-run -- true
+gs -- true
 want "apply: primary at 1x"                 "eDP-1;1;yes;"
 want "apply: secondary at 1x too"           "HDMI-1;1;no;"
 want "apply: laid out afresh, not replayed" "apply --pack"
@@ -125,7 +97,7 @@ cursor_size=24
 monitor=eDP-1;1.3333333730697632;yes;0;0;normal
 monitor=HDMI-1;1.3333333730697632;no;1920;0;normal
 EOF
-run --restore
+gs --restore
 want "restore: primary replayed at saved scale" \
     "eDP-1;1.3333333730697632;yes;0;0;normal"
 want "restore: secondary replayed too" \
@@ -140,7 +112,7 @@ fi
 # --- malformed input fails closed ----------------------------------------
 reject() {
     printf '%b' "$2" > "$STATE"
-    run --restore
+    gs --restore
     if [[ -n "$(applied)" ]]; then
         bad "reject $1"; printf '        sent: %s\n' "$(applied)"
     elif [[ ! -f "$STATE" ]]; then
@@ -199,36 +171,82 @@ else
     ok "survivor: state cleared once the display was restored"
 fi
 
-# --- the state file names the run that wrote it ---------------------------
-# Without it a watchdog still finishing its grace period cannot tell the state
-# it was started for from the next game's, and restores the wrong one.
+# --- the run that wrote the state is identified, without touching the format --
+# A watchdog finishing its grace period has to tell the state it was started for
+# from the next game's. Keeping that token in a SIBLING file rather than in the
+# state means the format older copies parse strictly never changed.
 : > "$LOG"; rm -f "$STATE"
-DETECT_FIXTURE="$TWO_MONITORS" PY_LOG="$LOG" GAMESCALE_NO_WATCH=1 \
-HOME="$FAKEHOME" PATH="$STUBS:$PATH" \
-    bash "$SCRIPT" -- sh -c "cat '$STATE' > '$WORK/during'" >/dev/null 2>&1
-if grep -qE '^run=[0-9A-Za-z-]+$' "$WORK/during" 2>/dev/null; then
-    ok "state names the run that wrote it"
+env DETECT_FIXTURE="$TWO_MONITORS" PY_LOG="$LOG" GS_LOG="$GS_LOG" \
+    GAMESCALE_NO_WATCH=1 HOME="$FAKEHOME" PATH="$STUBS:$PATH" \
+    bash "$SCRIPT" -- sh -c "cat '$STATE' > '$WORK/during'; cat '$RUNF' > '$WORK/during.run'; stat -c %a '$STATE' > '$WORK/during.mode'" \
+    >/dev/null 2>&1
+if grep -qE '^[0-9A-Za-z-]+$' "$WORK/during.run" 2>/dev/null; then
+    ok "the run is identified in a sibling file"
 else
-    bad "state has no run token"
-    printf '        state was: %s\n' "$(tr '\n' '|' < "$WORK/during" 2>/dev/null)"
+    bad "no run token was written"
+fi
+if grep -q '^run=' "$WORK/during" 2>/dev/null; then
+    bad "state format left unchanged by the run token"
+else
+    ok "state format left unchanged by the run token"
+fi
+# The whole state file, asserted as a literal. Nothing else read one back, and a
+# mutant that wrote only the first monitor survived the entire suite — which on
+# two monitors means restore switches the other display OFF.
+{
+    printf 'version=2\ntext_scale=1.0\ncursor_size=24\n'
+    printf 'monitor=HDMI-1;1.3333333730697632;no;1920;0;normal\n'
+    printf 'monitor=eDP-1;1.3333333730697632;yes;0;0;normal\n'
+} > "$WORK/expected"
+if diff -q "$WORK/expected" "$WORK/during" >/dev/null 2>&1; then
+    ok "state records every monitor, exactly"
+else
+    bad "state does not match what was detected"
+    diff "$WORK/expected" "$WORK/during" 2>&1 | sed 's/^/        /'
+fi
+# The mode of the live file, not of a copy this test made — the copy would carry
+# the test shell's umask and pass or fail for the wrong reason.
+if [[ "$(cat "$WORK/during.mode" 2>/dev/null)" == "600" ]]; then
+    ok "state is not world-readable"
+else
+    bad "state mode is $(cat "$WORK/during.mode" 2>/dev/null), want 600"
+fi
+if [[ -e "$STATE.new" ]]; then
+    bad "the write-and-rename temp file was left behind"
+else
+    ok "no temp file left behind"
 fi
 
 # --- a second run does not touch the first one's display ------------------
 # Two games at once means two owners of one display. Refusing is the only safe
 # answer: the alternative reverted the running game and deleted its state.
 : > "$LOG"; rm -f "$STATE"
-DETECT_FIXTURE="$TWO_MONITORS" PY_LOG="$LOG" GAMESCALE_NO_WATCH=1 \
-HOME="$FAKEHOME" PATH="$STUBS:$PATH" \
-    bash "$SCRIPT" -- sleep 6 >/dev/null 2>&1 &
+env DETECT_FIXTURE="$TWO_MONITORS" PY_LOG="$LOG" GS_LOG="$GS_LOG" \
+    GAMESCALE_NO_WATCH=1 HOME="$FAKEHOME" PATH="$STUBS:$PATH" \
+    setsid bash "$SCRIPT" -- sleep 60 >/dev/null 2>&1 &
 first=$!
-sleep 1
-: > "$LOG"
-second_out=$(DETECT_FIXTURE="$TWO_MONITORS" PY_LOG="$LOG" GAMESCALE_NO_WATCH=1 \
-    HOME="$FAKEHOME" PATH="$STUBS:$PATH" \
+
+# Wait for the lock to actually be taken rather than sleeping and hoping. A
+# fixed sleep here made the whole case a race: on a slow runner the second run
+# won the lock and the test failed for a tool that was behaving correctly.
+held=0
+for _ in $(seq 1 100); do
+    if ! flock -n "$LOCK" -c true 2>/dev/null; then held=1; break; fi
+    sleep 0.1
+done
+if [[ $held == 1 ]]; then
+    ok "first run takes the lock before scaling"
+else
+    bad "first run never took the lock"
+fi
+
+SECOND_LOG="$WORK/second.log"; : > "$SECOND_LOG"
+second_out=$(env DETECT_FIXTURE="$TWO_MONITORS" PY_LOG="$SECOND_LOG" GS_LOG="$GS_LOG" \
+    GAMESCALE_NO_WATCH=1 HOME="$FAKEHOME" PATH="$STUBS:$PATH" \
     bash "$SCRIPT" -- true 2>&1)
-if [[ -n "$(applied)" ]]; then
+if grep -qE '^- (apply|verify)' "$SECOND_LOG"; then
     bad "second run left the first one's display alone"
-    printf '        sent: %s\n' "$(applied)"
+    printf '        sent: %s\n' "$(cat "$SECOND_LOG")"
 else
     ok "second run left the first one's display alone"
 fi
@@ -243,7 +261,150 @@ if [[ -f "$STATE" ]]; then
 else
     bad "second run deleted the first one's state"
 fi
-kill -9 "$first" 2>/dev/null; wait "$first" 2>/dev/null
+# Kill the whole group, not just the wrapper: the game inherits the lock fd, so
+# an orphaned `sleep` keeps holding it and every later case gets refused. That is
+# the fd inheritance the watchdog depends on, seen from the other side.
+kill -9 -- "-$first" 2>/dev/null; wait "$first" 2>/dev/null
+for _ in $(seq 1 100); do
+    flock -n "$LOCK" -c true 2>/dev/null && break
+    sleep 0.1
+done
+
+# --- font and cursor compensation, in both directions ----------------------
+# Half of what the user actually sees, and nothing observed it: mutants that
+# never restored the font, that inverted the ratio so text SHRANK, and that
+# ignored GAMESCALE_NO_FONT all survived the whole suite.
+: > "$LOG"; : > "$GS_LOG"; rm -f "$STATE"
+gs -- true
+if grep -q 'set org.gnome.desktop.interface text-scaling-factor 1.33333' "$GS_LOG"; then
+    ok "font scaled up by the inverse of the primary's scale"
+else
+    bad "font not compensated"; printf '        gsettings: %s\n' "$(tr '\n' '|' < "$GS_LOG")"
+fi
+if grep -q 'set org.gnome.desktop.interface cursor-size 32' "$GS_LOG"; then
+    ok "cursor scaled with it"
+else
+    bad "cursor not compensated"; printf '        gsettings: %s\n' "$(tr '\n' '|' < "$GS_LOG")"
+fi
+# 1.0 and 24 are what the stub reports as the originals, so seeing them set is
+# the restore. A mutant that inverted the ratio also fails the checks above.
+if grep -q 'set org.gnome.desktop.interface text-scaling-factor 1.0$' "$GS_LOG" \
+   && grep -q 'set org.gnome.desktop.interface cursor-size 24$' "$GS_LOG"; then
+    ok "font and cursor put back on exit"
+else
+    bad "font and cursor not restored"; printf '        gsettings: %s\n' "$(tr '\n' '|' < "$GS_LOG")"
+fi
+
+: > "$LOG"; : > "$GS_LOG"; rm -f "$STATE"
+run env GAMESCALE_NO_FONT=1 bash "$SCRIPT" -- true
+# The contract is that the font is never SCALED, not that gsettings is never
+# called: restore still writes back the values read at startup, which with this
+# flag set are the values already there. Idempotent, and correct if the flag is
+# toggled between a launch and its restore.
+if grep -qE 'set .*(text-scaling-factor 1\.33|cursor-size 32)' "$GS_LOG"; then
+    bad "GAMESCALE_NO_FONT=1 still compensated the font"
+    printf '        gsettings: %s\n' "$(tr '\n' '|' < "$GS_LOG")"
+else
+    ok "GAMESCALE_NO_FONT=1 never compensates the font"
+fi
+if applied | grep -q -- '--pack'; then
+    ok "GAMESCALE_NO_FONT=1 still scales the display"
+else
+    bad "GAMESCALE_NO_FONT=1 stopped the scaling too"
+fi
+
+# --- a non-default GAMESCALE_SCALE is honoured -----------------------------
+: > "$LOG"; rm -f "$STATE"
+run env GAMESCALE_SCALE=1.5 bash "$SCRIPT" -- true
+if packed | grep -q ';1.5;'; then
+    ok "GAMESCALE_SCALE reaches the configuration"
+else
+    bad "GAMESCALE_SCALE ignored"; printf '        sent: %s\n' "$(packed)"
+fi
+
+# --- partial restore keeps the state file ----------------------------------
+# The hazard the code documents at length: if the scale comes back but the font
+# does not, the compensated size is still in gsettings. Clearing state there
+# makes it the next run's recorded "original", compounding on every launch.
+: > "$LOG"; : > "$GS_LOG"
+cat > "$STATE" <<'EOF'
+version=2
+text_scale=1.0
+cursor_size=24
+monitor=eDP-1;1.5;yes;0;0;normal
+monitor=HDMI-1;1.5;no;1920;0;normal
+EOF
+run env GS_FAIL_SET=text-scaling-factor bash "$SCRIPT" --restore
+rc=$?
+if [[ -f "$STATE" ]]; then
+    ok "partial restore keeps the state for another layer to retry"
+else
+    bad "partial restore cleared the state"
+fi
+if [[ $rc -ne 0 ]]; then
+    ok "partial restore reports failure"
+else
+    bad "partial restore claimed success"
+fi
+
+# --- giving up always still launches the game ------------------------------
+# A failed scale flip must never be a failed game launch. The mutant that made
+# give_up stop exec-ing the game survived every suite, and it turns every
+# failure mode into "my game will not start from Steam".
+: > "$LOG"; rm -f "$STATE"
+marker="$WORK/ran"; rm -f "$marker"
+run env PY_FAIL_RC=2 bash "$SCRIPT" -- touch "$marker"
+if [[ -f "$marker" ]]; then
+    ok "mutter refusing the layout still launches the game"
+else
+    bad "mutter refusing the layout stopped the game"
+fi
+if [[ -f "$STATE" ]]; then
+    bad "state kept after nothing was applied"
+else
+    ok "state cleared after nothing was applied"
+fi
+
+# A state directory that cannot be written means nothing would know how to put
+# the display back, so the display must not move.
+: > "$LOG"; rm -f "$STATE"; rm -f "$marker"
+chmod 500 "$FAKEHOME/.local/state/gamescale"
+run bash "$SCRIPT" -- touch "$marker"
+chmod 700 "$FAKEHOME/.local/state/gamescale"
+if [[ -f "$marker" ]]; then
+    ok "an unwritable state dir still launches the game"
+else
+    bad "an unwritable state dir stopped the game"
+fi
+if applied | grep -q -- '--pack'; then
+    bad "display moved with nothing recording where it was"
+    printf '        sent: %s\n' "$(applied)"
+else
+    ok "display left alone with nothing recording where it was"
+fi
+
+# A leftover state file that will not restore means the font and cursor sizes in
+# gsettings may already be a previous run's compensated values.
+: > "$LOG"; rm -f "$marker"
+cat > "$STATE" <<'EOF'
+version=2
+text_scale=1.0
+cursor_size=24
+monitor=DP-9;1.5;yes;0;0;normal
+EOF
+run bash "$SCRIPT" -- touch "$marker"
+if [[ -f "$marker" ]]; then
+    ok "an unrestorable leftover still launches the game"
+else
+    bad "an unrestorable leftover stopped the game"
+fi
+if packed | grep -q ';1;'; then
+    bad "scaled anyway, on top of a failed restore"
+    printf '        sent: %s\n' "$(packed)"
+else
+    ok "does not scale on top of a failed restore"
+fi
+rm -f "$STATE"
 
 echo
 echo "  $PASS passed, $FAIL failed"

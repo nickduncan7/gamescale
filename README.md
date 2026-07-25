@@ -11,10 +11,12 @@ GNOME/Mutter on Wayland. Works with Flatpak Steam and other Flatpak launchers.
 > and this one changes your display configuration — read the script before you
 > run it. It isn't unvalidated, though: the numbers below were measured on a
 > Lenovo Legion Pro 7i (2560×1600 at 133%) running Fedora Silverblue 44, GNOME
-> 50.3 and Flatpak Steam, and CI runs shellcheck plus four test suites — 111
-> assertions over reading the display, the exact configuration written back, the
-> state format, and the restore-after-SIGKILL path — on every push. Other GNOME
-> versions and other hardware are less certain; issues welcome.
+> 50.3 and Flatpak Steam, and CI runs shellcheck plus six test suites — 180
+> assertions — on every push, covering what is read from mutter, the exact
+> configuration written back, the state file, restore-after-SIGKILL, the
+> sandboxed branch, and the installer's grants. Those suites were themselves
+> checked by injecting regressions and confirming they fail. Other GNOME versions
+> and other hardware are less certain; issues welcome.
 
 ## The problem
 
@@ -106,7 +108,7 @@ needs no root, and is safe to re-run. Downloads are checked against the
 | `--platform NAME...` | which launchers to grant (default `steam`) |
 | `--dry-run` | print every action, take none |
 | `--uninstall` | remove everything it installed |
-| `GAMESCALE_REF=v1.4.0` | pin a version |
+| `GAMESCALE_REF=v1.5.0` | pin a version |
 | `GAMESCALE_BINDIR=...` | install somewhere else |
 | `GAMESCALE_NO_FLATPAK=1` | skip launcher grants |
 | `GAMESCALE_NO_UNIT=1` | skip the login reconcile unit |
@@ -356,9 +358,10 @@ display, so a broken reader can decline to scale you but can't strand you at 1×
 shellcheck -S style gamescale.sh install.sh test/*.sh
 ./test/detect_test.py      # reading, against synthetic mutter replies
 ./test/apply_test.py       # the exact configuration written back to mutter
-./test/state_test.sh       # state format, and the records built from it
+./test/state_test.sh       # state file, records, and the give-up paths
 ./test/watchdog_test.sh    # restore after SIGKILL, and no restore before it
-./install.sh --dry-run     # what CI smoke-tests the installer with
+./test/sandbox_test.sh     # the flatpak-spawn branch, and --doctor
+./test/install_test.sh     # the grant argv, checksums, uninstall decisions
 ```
 
 No display is touched by any of them. The Python suites extract the display
@@ -368,10 +371,19 @@ signature fails there rather than at runtime, and `apply_test.py` can assert the
 exact payload — including that every configuration is verified before it is
 applied, and that nothing is applied when verification fails.
 
-The shell suites stub `python3`, `gsettings` and `systemd-run` on `PATH` and
-drive the real script end to end; `state_test.sh`'s stub also refuses
-configurations naming a disconnected monitor, the way mutter does, so the
-unplugged-display fallback is exercised rather than assumed. `watchdog_test.sh`
-takes about 25 seconds: it kills a fake game with `SIGKILL` so the trap never
-runs, then asserts the watchdog restored anyway — and that it does *not* restore
-while the game is alive, after timing out, or for a run that isn't its own.
+The shell suites share `test/stubs.sh`, which stubs `python3`, `gsettings`,
+`systemd-run` and `flatpak-spawn` on `PATH` and drives the real script end to
+end. Those stubs can be made to **fail** — that is the point. A mutation battery
+found fifteen injected regressions surviving the whole suite, all for the same
+reason: with stubs that always succeed, no error branch is reachable. So the
+stubs now refuse configurations naming a disconnected monitor the way mutter
+does, can fail a specific `gsettings` key, and can return any exit status, which
+is what lets the give-up paths, the partial-restore branch and the
+font/cursor compensation be asserted at all.
+
+`watchdog_test.sh` takes about 25 seconds: it kills a fake game with `SIGKILL` so
+the trap never runs, then asserts the watchdog restored anyway — and that it does
+*not* restore while the game is alive, after timing out, or for a run that isn't
+its own. `sandbox_test.sh` fakes `/.flatpak-info` via `GAMESCALE_FLATPAK_INFO`,
+which exists solely so the branch every Flatpak user takes is reachable from a
+test; it asserts every host command goes out through `flatpak-spawn`.
