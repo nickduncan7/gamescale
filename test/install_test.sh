@@ -89,7 +89,11 @@ bad() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 install_sh() {  # install_sh ARGS... ; env comes from the caller
     : > "$FLATPAK_LOG"
-    env HOME="$FAKEHOME" GAMESCALE_BINDIR="$BINDIR" PATH="$STUBS:/usr/bin:/bin" \
+    # -u, not just assignment: an ambient GAMESCALE_NO_FLATPAK=1 turns off the
+    # grants this suite asserts, and a CI step that set it for other reasons is
+    # exactly how that happened.
+    env -u GAMESCALE_NO_FLATPAK -u GAMESCALE_REF -u GAMESCALE_NO_VERIFY \
+        HOME="$FAKEHOME" GAMESCALE_BINDIR="$BINDIR" PATH="$STUBS:/usr/bin:/bin" \
         FLATPAK_LOG="$FLATPAK_LOG" INSTALLED="${INSTALLED:-}" \
         HOME_ACCESS_APP="${HOME_ACCESS_APP:-}" OVERRIDES="${OVERRIDES:-}" \
         SANDBOX_PATH="${SANDBOX_PATH:-}" SERVE="$SERVE" \
