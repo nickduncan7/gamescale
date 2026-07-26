@@ -17,6 +17,7 @@
 #   GS_FAIL_SET      substring of a gsettings key whose `set` must fail
 #   SPAWN_LOG        file receiving each flatpak-spawn --host invocation
 #   SYSTEMD_RUN_LOG  file receiving each systemd-run invocation
+#   FAKE_KVER        kernel release `uname -r` reports (default: the real one)
 
 make_stubs() {
     local dir="$1"
@@ -106,5 +107,21 @@ STUB
 exec "$@"
 STUB
 
-    chmod +x "$dir/python3" "$dir/gsettings" "$dir/systemd-run" "$dir/flatpak-spawn"
+    # --doctor decides whether ntsync is the interface Proton wants by kernel
+    # version, and a runner's kernel is whatever it is. Defaults to the truth so
+    # every other suite is unaffected by its presence on PATH.
+    cat > "$dir/uname" <<'STUB'
+#!/bin/sh
+if [ -n "${FAKE_KVER:-}" ] && [ "${1:-}" = "-r" ]; then
+    echo "$FAKE_KVER"
+    exit 0
+fi
+for real in /usr/bin/uname /bin/uname; do
+    [ -x "$real" ] && exec "$real" "$@"
+done
+exit 1
+STUB
+
+    chmod +x "$dir/python3" "$dir/gsettings" "$dir/systemd-run" \
+             "$dir/flatpak-spawn" "$dir/uname"
 }

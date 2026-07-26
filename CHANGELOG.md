@@ -3,6 +3,95 @@
 Dates are release dates. "Stranding" below means a desktop left at 1× scale,
 which is the failure this tool exists not to cause.
 
+## 1.6.0 — 2026-07-26
+
+Per-launch environment passthrough and per-game defaults, so every title can use
+the identical launch options string — `gamescale %command%` — forever, with the
+per-game decisions living in one config file. Nothing in the restore machinery
+changed; this release is additive around it.
+
+### Added
+
+- **Flags, in two categories**, because the distinction is the point. `-x`
+  (`--no-scale`), `-f` (`--no-font`) and `-s FACTOR` (`--scale`) configure
+  gamescale. `-w`, `-n`, `-m` and `-e KEY=VAL` configure the *environment of the
+  game* and change nothing about scaling — each shorthand is literally
+  implemented as an `-e` alias. Short flags combine (`-wn`); parsing stops at
+  the first non-flag argument or `--`, so both invocation forms work. The prefix
+  form `PROTON_ENABLE_WAYLAND=1 gamescale %command%` is untouched and still the
+  simplest thing that works.
+- **`games.conf`** — `<appid> = <letters and KEY=VAL>`, parsed never sourced, in
+  the state directory that is already `:create`-granted, so no new Flatpak
+  permissions. Malformed lines are reported by line number and skipped; an
+  unknown but well-formed `KEY=VAL` is not an error, which is what lets a
+  variable invented after this release still be used.
+- **`--set-game <appid> <entry|->`**, validating with the same parser the launch
+  path uses, rewriting atomically, and preserving your comments, blank lines and
+  unrelated entries verbatim. New entries get `# <game name>` when it can be
+  read out of `appmanifest_<appid>.acf`; failing to resolve one is silent.
+- **Precedence, stated and visible.** Explicit flags > `games.conf` > inherited
+  environment. The config is consulted only when `SteamAppId` is set *and* no
+  flag was given: any flag disables the lookup entirely, all-or-nothing rather
+  than a per-key merge, because a merge has no rule anyone can state in one
+  sentence. Every export is echoed with its source, and an export that disagrees
+  with an inherited value warns. Equal values are not a conflict; nothing is
+  ever blocked. `-e KEY=0` is the documented way to override your own config for
+  one launch.
+- **`-x`, env-only mode.** Exports, execs, and touches nothing else — no display
+  read or write, no font or cursor change, no state file, **no lock**, no
+  watchdog. Not holding the lock is the load-bearing part: an `-x` launch is not
+  an owner of the display, so it neither blocks nor is blocked by a scaled
+  launch of another game.
+- `lastrun-<appid>` records the last launch's source and exports for `--status`.
+  Informational only — nothing restores from it, one file per game, overwritten
+  in place. Parsed, never sourced (it lives in the same sandbox-writable
+  directory as the state file); unknown keys are ignored, since nothing acts
+  on the record.
+- `--status [appid]` gains the parsed config table and a per-game view; the old
+  output is unchanged.
+- `--doctor` gains an ntsync check (device plus kernel ≥ 6.14, a **warning**
+  rather than a failure — an absent `/dev/ntsync` is a fact about your kernel,
+  not a broken install), the wayland caveat, a `games.conf` parse through the
+  same parser the launch path uses, and the shorthand expansion table with the
+  stock-Proton caveats.
+- `test/env_test.sh` — 130 assertions. Total across the suites: 180 to 310.
+
+### Fixed
+
+- **Two of the three shorthands were specified against variable names stock
+  Proton does not read, and verifying them first is why they ship annotated
+  rather than silently broken.** Checked 2026-07-26 against `proton-11.0-1`,
+  `experimental-11.0-20260713` and `hotfix-20260710`:
+  - `PROTON_USE_WAYLAND` is not the name; `PROTON_ENABLE_WAYLAND` is, and it is
+    a **GE-Proton / proton-cachyos** variable. Stock Proton ships **no wayland
+    driver at all** — `winex11.drv` only, no `winewayland.drv`, and the string
+    `winewayland` in no binary of any of the three — so on stock Proton there is
+    nothing for any spelling to switch on.
+  - `PROTON_USE_NTSYNC` is read by nothing. ntsync is **on by default** and the
+    only variable present is the negative one, `PROTON_NO_NTSYNC`, so `-n` asks
+    for something already true and `-e PROTON_NO_NTSYNC=1` is the toggle that
+    still does something.
+- This also corrects the record on the wayland measurement: `3840×2400` in-game
+  with the variable set was **silent XWayland fallback**, not winewayland
+  running without `wp_fractional_scale_v1`. There was no wayland driver to fall
+  back from. See the README, which now documents the check that tells them
+  apart.
+
+### Changed
+
+- **One expansion table**, at the top of the script, is the only place a
+  variable name is written down. These names rot — Proton renames them, flips
+  defaults, and the forks disagree with upstream — and a rotted shorthand
+  exports perfectly and does nothing, which is a failure the export echo cannot
+  explain. So `--doctor` prints the table with the stock-Proton caveats; the
+  tests pin the expansions as literals so a silent change fails CI; and `-e`
+  remains the recovery that needs no release at all.
+- Host-side `sh -c` and awk calls pass paths as positional arguments instead
+  of interpolating them into the script text, so a path containing a quote
+  cannot break — or inject into — the host-side shell.
+- `--status` with a failed display detection now prints the rest of its output
+  before exiting non-zero, instead of stopping at that line.
+
 ## 1.5.0 — 2026-07-25
 
 Tests and seams. No new features: a mutation battery injected twenty regressions

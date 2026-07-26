@@ -56,6 +56,7 @@ jobs:
           ./test/state_test.sh
           ./test/watchdog_test.sh
           ./test/sandbox_test.sh
+          ./test/env_test.sh
           ./test/install_test.sh
           GAMESCALE_NO_FLATPAK=1 GAMESCALE_NO_UNIT=1 ./install.sh --dry-run
           GAMESCALE_NO_FLATPAK=1 GAMESCALE_NO_UNIT=1 ./install.sh --uninstall --dry-run
