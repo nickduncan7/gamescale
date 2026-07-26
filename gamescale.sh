@@ -1377,7 +1377,7 @@ if [[ "$MODE" == "doctor" ]]; then
     if host test -r "$GAMES_FILE"; then
         # Both streams captured in one parse: the callback marks accepted
         # entries on stdout, the parser complains on stderr.
-        # shellcheck disable=SC2329  # called by name from games_each
+        # shellcheck disable=SC2317,SC2329  # called by name from games_each
         doctor_line() { printf 'entry %s\n' "$1"; }
         GAMES_OUT=$(games_each doctor_line 2>&1)
         GAMES_SEEN=$(printf '%s\n' "$GAMES_OUT" | grep -c '^entry ')
@@ -1462,7 +1462,7 @@ if [[ "$MODE" == "status" ]]; then
     if host test -r "$GAMES_FILE"; then
         echo
         echo "games.conf:   $GAMES_FILE"
-        # shellcheck disable=SC2329  # called by name from games_each
+        # shellcheck disable=SC2317,SC2329  # called by name from games_each
         status_line() {
             printf '  %-10s %-32s %s\n' "$1" "$(game_name "$1" || echo '-')" "$2"
         }
