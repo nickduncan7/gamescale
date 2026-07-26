@@ -11,10 +11,10 @@ GNOME/Mutter on Wayland. Works with Flatpak Steam and other Flatpak launchers.
 > and this one changes your display configuration — read the script before you
 > run it. It isn't unvalidated, though: the numbers below were measured on a
 > Lenovo Legion Pro 7i (2560×1600 at 133%) running Fedora Silverblue 44, GNOME
-> 50.3 and Flatpak Steam, and CI runs shellcheck plus six test suites — 180
+> 50.3 and Flatpak Steam, and CI runs shellcheck plus seven test suites — 310
 > assertions — on every push, covering what is read from mutter, the exact
 > configuration written back, the state file, restore-after-SIGKILL, the
-> sandboxed branch, and the installer's grants. Those suites were themselves
+> sandboxed branch, the flag and config parsers, and the installer's grants. Those suites were themselves
 > checked by injecting regressions and confirming they fail. Other GNOME versions
 > and other hardware are less certain; issues welcome.
 
@@ -41,12 +41,21 @@ That's what this does, for the lifetime of one process. Since a permanently
 unscaled desktop is a tiny desktop, it also scales font and cursor by the
 inverse factor while the game runs, and reverts both on exit.
 
-This is a workaround, and it should have an end date. Upstream tracks the gaps in
-[mutter#478](https://gitlab.gnome.org/GNOME/mutter/-/work_items/478) —
-*Fractional Scaling Known issues and TODO*, still open — whose list includes
-"XWayland clients: support clients with native scaling in unscaled screen". That
-item landing and working is the thing to watch: it makes this repo unnecessary,
-and deleting it then is the intended outcome.
+This is a workaround, and it should have an end date. There are **two exits, and
+neither has arrived**:
+
+1. **[mutter#478](https://gitlab.gnome.org/GNOME/mutter/-/work_items/478)** —
+   *Fractional Scaling Known issues and TODO*, still open — whose list includes
+   "XWayland clients: support clients with native scaling in unscaled screen".
+   That item landing *and working* retires the whole tool.
+2. **Proton rebased on Wine ≥ 11.12**, with fractional scaling actually
+   engaging. That one retires the scale flip game by game rather than all at
+   once: a title that no longer needs it becomes a one-letter `x` entry in
+   `games.conf` — env-only, no display touched — while the environment
+   passthrough around it stays useful. Today this is further off than it looks,
+   since stock Proton ships [no wayland driver at all](#wayland).
+
+Either way, deleting this repo is the intended outcome.
 
 ### Multiple monitors
 
@@ -64,6 +73,48 @@ Row 2 is what gamescale did before v1.1.0 — 78% *more* pixels than never
 running it. Since v1.1.0 every monitor moves to 1× together, and the whole
 layout (scales, positions, transforms, which display was primary) is saved and
 replayed on exit.
+
+### Wayland
+
+Short version: on stock Valve Proton there is currently **no wayland path to
+try**, and asking for one costs you nothing and gains you nothing.
+
+Measured on GNOME 50.3 at 133%, borderless fullscreen: a game launched with
+`PROTON_ENABLE_WAYLAND=1` reports **3840×2400** in-game — the same number, and
+the same 2.25× render cost, as plain XWayland at factor 2. Setting the variable
+changed nothing at all.
+
+The reason is duller than it first looked, and worth writing down because the
+obvious explanation is wrong. It is tempting to conclude that winewayland ran
+and, lacking `wp_fractional_scale_v1`, took mutter's integer `wl_output` scale —
+arriving at the same 2.25× by a different route. That is not what happened.
+**Stock Proton ships no wayland driver at all.** Checked 2026-07-26 across every
+build Steam offers here:
+
+| build | display drivers shipped |
+|---|---|
+| `proton-11.0-1` | `winex11.drv` only |
+| `experimental-11.0-20260713` | `winex11.drv` only |
+| `hotfix-20260710` | `winex11.drv` only |
+
+No `winewayland.drv`, no `winewayland.so`, and the string `winewayland` appears
+in no binary in any of the three. So there was never a wayland driver to fall
+back *from*: the game was an X11 client from the first frame, and
+`PROTON_ENABLE_WAYLAND` was read by nothing. `PROTON_ENABLE_WAYLAND` is a
+**GE-Proton and proton-cachyos** variable — those builds do ship the driver.
+
+Because the fallback is silent either way, the only honest check is to ask who
+is holding an X11 connection:
+
+```sh
+flatpak run --command=xlsclients com.valvesoftware.Steam
+```
+
+If your game is in that list, it is an X11 client and gamescale's scale flip is
+still what's doing the work. And note that a wayland game would have **the same
+problem anyway** — the resolution it's handed is the compositor's logical size
+either way. `-w` is environment passthrough, not a rendering mode; it does not
+change how, or whether, gamescale scales anything.
 
 ### Two things that don't work
 
@@ -189,9 +240,10 @@ Anywhere else: `gamescale -- /path/to/game`.
 
 | | |
 |---|---|
-| `--status` | detected monitors and scales, font/cursor, stale state |
+| `--status [appid]` | detected monitors and scales, font/cursor, stale state; with an appid, what that game would get |
 | `--doctor` | full dependency and permission check |
 | `--restore` | put the display back from a stranded state file |
+| `--set-game <appid> <entry>` | write a `games.conf` entry (`-` removes it) |
 | `--install-unit` | install the login reconcile service |
 | `--version`, `-V` | which release this is |
 | `--help`, `-h` | the full commentary from the top of the script |
@@ -202,6 +254,160 @@ Anywhere else: `gamescale -- /path/to/game`.
 | `GAMESCALE_NO_FONT` | `1` to skip font/cursor compensation |
 | `GAMESCALE_NO_WATCH` | `1` to skip the host watchdog (trap only) |
 | `GAMESCALE_DEBUG` | `1` for verbose logging |
+
+### Flags
+
+Two categories, and the difference between them is the whole point. The first
+configures **gamescale**. The second configures the **environment of the game**,
+and nothing in it changes how — or whether — anything is scaled.
+
+Wrapper behaviour:
+
+| | | |
+|---|---|---|
+| `-x` | `--no-scale` | env-only: export, exec, touch nothing else |
+| `-f` | `--no-font` | same as `GAMESCALE_NO_FONT=1` |
+| `-s FACTOR` | `--scale FACTOR` | same as `GAMESCALE_SCALE=FACTOR` |
+
+Environment shorthands, each *defined as* an alias of `-e`:
+
+| | | |
+|---|---|---|
+| `-w` | `--env-wayland` | `-e PROTON_ENABLE_WAYLAND=1` |
+| `-n` | `--env-ntsync` | `-e PROTON_USE_NTSYNC=1` |
+| `-m` | `--env-mangohud` | `-e MANGOHUD=1` |
+| `-e KEY=VAL` | `--env KEY=VAL` | export `KEY=VAL` into the game. Repeatable. |
+
+The long names carry `--env-` deliberately: `--wayland` would read as a
+gamescale rendering mode, which it is not.
+
+Short flags combine (`-wn`, `-xm`). Parsing stops at the first non-flag argument
+or at `--`, so both `gamescale [flags] %command%` and `gamescale [flags] --
+/path/to/game` work. The prefix form is fully supported and is still the
+simplest thing that works:
+
+```sh
+PROTON_ENABLE_WAYLAND=1 gamescale %command%
+```
+
+`KEY` must be a normal variable name; anything else is a usage error that
+**still launches the game**. `VAL` is passed through byte for byte — but Steam's
+launch-options field makes values containing spaces genuinely miserable to
+quote, and that's Steam's problem, not one this can fix. Put those in
+`games.conf`.
+
+#### These names rot — and two of them are already inert
+
+Proton renames variables, flips defaults, and the forks disagree with upstream.
+As of 2026-07-26, on **stock Valve Proton**:
+
+- `-w` does nothing — no Proton build ships a wayland driver ([above](#wayland)).
+  It is correct for GE-Proton and proton-cachyos.
+- `-n` does nothing — ntsync is **on by default**, and the only variable that
+  exists is the negative one. `-e PROTON_NO_NTSYNC=1` turns it *off*, which is
+  the toggle that still does something.
+- `-m` works everywhere; `MANGOHUD` is MangoHud's own variable, not Proton's.
+
+A rotted shorthand is a nasty failure mode: the export succeeds, so the log says
+it worked, and the game just behaves as if you'd set nothing. Two things guard
+against that. **`--doctor` prints the expansion table** with the stock-Proton
+caveats above. And **`-e` is the recovery** — the letters are only convenience
+over it, so when a name rots, `-e THE_RIGHT_NAME=1` works immediately with no
+release and no waiting. There is exactly one table, at the top of
+`gamescale.sh`; the tests pin its contents so a silent change fails CI.
+
+### Per-game defaults
+
+So that every title can use the same launch options string — `gamescale
+%command%` — forever, and the per-game decisions live in one file instead of in
+Steam's UI, thirty dialogs deep.
+
+`~/.local/state/gamescale/games.conf`:
+
+```
+# comments and blank lines ignored
+1817070 = wn                        # Halo: Campaign Evolved
+620     = w, MANGOHUD=1             # letters are sugar; full KEY=VAL accepted
+22380   = x                         # env-only
+```
+
+Left side is a numeric appid. Right side is a comma-separated list where each
+item is either a string of flag letters (`w n m x f` — the same letters, meaning
+the same things) or a literal `KEY=VAL`. Anything carrying a value is written
+out in full, which is why the format needs no escaping rule. A `#` starts a
+comment at the start of a line or after whitespace, so a value can still contain
+one.
+
+A malformed line is reported by line number and **skipped**, not fatal. An
+unknown but well-formed `KEY=VAL` is *not* malformed — that's the escape hatch
+working, and it's what lets a variable invented after this release still be
+used.
+
+```sh
+gamescale --set-game 1817070 wn          # create or replace
+gamescale --set-game 620 w,MANGOHUD=1
+gamescale --set-game 1817070 -           # remove
+gamescale --status 1817070               # what that game would get
+```
+
+`--set-game` validates with the same parser the launch path uses, rewrites the
+file atomically, and preserves your comments, blank lines and unrelated
+entries verbatim. It adds `# <game name>` to new entries when it can read the
+name out of `appmanifest_<appid>.acf`; failing to resolve one is silent.
+
+### Precedence
+
+**explicit flags > `games.conf` > inherited environment.**
+
+The config is consulted only when `SteamAppId` is present *and* the command line
+carries no flags at all. **Any** explicit flag — either category — turns the
+lookup off entirely for that launch. All or nothing, never a per-key merge:
+a merge has no rule anyone can state in one sentence, and this one you can hold
+in your head at the launch-options box.
+
+That gives you the override idiom. `-e KEY=0` is how you win an argument with
+your own config file for a single launch:
+
+```sh
+gamescale -e PROTON_ENABLE_WAYLAND=0 %command%
+```
+
+Every export is echoed at launch, one line each, naming where it came from —
+because with three config surfaces, "I set a flag and nothing happened" is
+otherwise unanswerable after the fact:
+
+```
+gamescale: exporting PROTON_ENABLE_WAYLAND=1 (-w)
+gamescale: exporting MANGOHUD=1 (games.conf:1817070)
+```
+
+And an export that disagrees with a variable already in your environment says
+so. Equal values are not a conflict, and nothing is ever blocked:
+
+```
+gamescale: games.conf(1817070) overrides inherited PROTON_ENABLE_WAYLAND=0 -> 1
+```
+
+The last launch is also recorded in `~/.local/state/gamescale/lastrun-<appid>`,
+which `--status` reads back. It is informational only — nothing restores from
+it, there is one per game, and each is overwritten in place.
+
+### `-x`, env-only
+
+`-x` exports the variables, execs the game, and touches **nothing** else: no
+display read, no display write, no font or cursor change, no state file, no
+lock, no watchdog, no contact with the restore machinery at all.
+
+The lock is the part that matters. An `-x` launch is not an owner of the
+display, so the [one-game-at-a-time](#how-it-survives-things) rule doesn't reach
+it in either direction — it neither blocks a scaled launch nor waits on one.
+That isn't a nicety. When one of the two exits below arrives, configs will
+mass-set `x` per game, and a one-at-a-time constraint on launches that change
+nothing would be a pure regression inherited from the release that removed the
+need for it.
+
+Combining `-x` with `-s` or `-f` warns — they configure a scale change that will
+now never happen — and proceeds env-only.
 
 ## How it survives things
 
@@ -361,6 +567,7 @@ shellcheck -S style gamescale.sh install.sh test/*.sh
 ./test/state_test.sh       # state file, records, and the give-up paths
 ./test/watchdog_test.sh    # restore after SIGKILL, and no restore before it
 ./test/sandbox_test.sh     # the flatpak-spawn branch, and --doctor
+./test/env_test.sh         # flags, games.conf, precedence, -x, --set-game
 ./test/install_test.sh     # the grant argv, checksums, uninstall decisions
 ```
 

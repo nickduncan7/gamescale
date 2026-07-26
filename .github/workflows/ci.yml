@@ -61,6 +61,13 @@ jobs:
       - name: sandboxed branch and doctor
         run: ./test/sandbox_test.sh
         timeout-minutes: 3
+      # Per-launch environment, per-game defaults and env-only mode. The
+      # expansion table's variable names are pinned here as literals, so a
+      # shorthand quietly changing what it exports fails CI rather than
+      # arriving as "the flag did nothing".
+      - name: environment and per-game defaults
+        run: ./test/env_test.sh
+        timeout-minutes: 4
       - name: installer
         run: ./test/install_test.sh
         timeout-minutes: 3
