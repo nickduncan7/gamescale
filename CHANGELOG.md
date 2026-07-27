@@ -3,6 +3,30 @@
 Dates are release dates. "Stranding" below means a desktop left at 1× scale,
 which is the failure this tool exists not to cause.
 
+## 1.7.0 — 2026-07-26
+
+### Added
+
+- **A top-bar indicator extension.** A gamescale icon while a run is active,
+  a menu listing exactly what will be restored, a "Restore now" item that
+  reports failure as a notification, a red icon when the run died without
+  restoring (state present, lock free), and — when the pre-game text scale
+  was 1.0 — suppression of the accessibility icon that the font compensation
+  otherwise lights up ("Large Text" is any `text-scaling-factor` above 1.0).
+  The suppression additionally requires that no other accessibility feature
+  is active and the icon isn't set to always show — an icon the user owns for
+  any other reason is never hidden.
+  It also keeps the px-sized shell chrome at its apparent size, multiplied by
+  the saved-scale/current-scale ratio and undone on restore: dash icons
+  (`iconSize` property interception), the alt-tab app switcher (per-popup
+  size-fit wrap), overview window-preview app icons, and notification/OSD
+  icons via a runtime stylesheet. The em-sized chrome — panel height, status
+  icons, all shell text — already follows the script's font compensation.
+  Display only: it watches the state file, spawns `gamescale --restore` on
+  request, and either side works without the other. Installed by `install.sh`
+  from a checkout only, never by the piped download; `GAMESCALE_NO_EXTENSION=1`
+  skips it.
+
 ## 1.6.0 — 2026-07-26
 
 Per-launch environment passthrough and per-game defaults, so every title can use

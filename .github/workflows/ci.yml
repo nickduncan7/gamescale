@@ -71,6 +71,11 @@ jobs:
       - name: installer
         run: ./test/install_test.sh
         timeout-minutes: 3
+      # Load-time failures only — a syntax error or uuid mismatch would
+      # otherwise surface as a silently absent indicator after login.
+      - name: extension sanity
+        run: ./test/extension_test.sh
+        timeout-minutes: 1
       # install.sh was linted but never run, which is how a broken --help and a
       # checksum bypass both shipped. These exercise it without touching the
       # system: no launcher grants, no unit, nothing installed.

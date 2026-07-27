@@ -63,6 +63,22 @@ cat > "$STUBS/systemctl" <<'STUB'
 exit 0
 STUB
 
+EXT_LOG="$WORK/gnome-extensions.log"
+cat > "$STUBS/gnome-extensions" <<'STUB'
+#!/bin/sh
+echo "$*" >> "$EXT_LOG"
+[ "${GNOME_EXT_FAIL:-0}" = "1" ] && exit 1
+exit 0
+STUB
+
+# Only the extension paths call gsettings; GS_LIST is what `get` returns.
+cat > "$STUBS/gsettings" <<'STUB'
+#!/bin/sh
+echo "gsettings $*" >> "$EXT_LOG"
+[ "$1" = "get" ] && printf '%s\n' "${GS_LIST:-@as []}"
+exit 0
+STUB
+
 # Serves files out of $SERVE, so the download-and-verify path can be driven
 # without a network.
 cat > "$STUBS/curl" <<'STUB'
@@ -81,23 +97,26 @@ cat "$SERVE/$name" > "$out"
 exit 0
 STUB
 
-chmod +x "$STUBS/flatpak" "$STUBS/systemctl" "$STUBS/curl"
+chmod +x "$STUBS/flatpak" "$STUBS/systemctl" "$STUBS/curl" \
+         "$STUBS/gnome-extensions" "$STUBS/gsettings"
 
 PASS=0; FAIL=0
 ok()  { printf '  \033[32mok\033[0m   %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 install_sh() {  # install_sh ARGS... ; env comes from the caller
-    : > "$FLATPAK_LOG"
+    : > "$FLATPAK_LOG"; : > "$EXT_LOG"
     # -u, not just assignment: an ambient GAMESCALE_NO_FLATPAK=1 turns off the
     # grants this suite asserts, and a CI step that set it for other reasons is
     # exactly how that happened.
     env -u GAMESCALE_NO_FLATPAK -u GAMESCALE_REF -u GAMESCALE_NO_VERIFY \
+        -u GAMESCALE_NO_EXTENSION \
         HOME="$FAKEHOME" GAMESCALE_BINDIR="$BINDIR" PATH="$STUBS:/usr/bin:/bin" \
         FLATPAK_LOG="$FLATPAK_LOG" INSTALLED="${INSTALLED:-}" \
         HOME_ACCESS_APP="${HOME_ACCESS_APP:-}" OVERRIDES="${OVERRIDES:-}" \
-        SANDBOX_PATH="${SANDBOX_PATH:-}" SERVE="$SERVE" \
-        GAMESCALE_NO_UNIT=1 \
+        SANDBOX_PATH="${SANDBOX_PATH:-}" SERVE="$SERVE" EXT_LOG="$EXT_LOG" \
+        GNOME_EXT_FAIL="${GNOME_EXT_FAIL:-}" GS_LIST="${GS_LIST:-}" \
+        GAMESCALE_NO_EXTENSION="${NO_EXT:-}" GAMESCALE_NO_UNIT=1 \
         sh "$INST/install.sh" "$@" 2>&1
 }
 
@@ -358,6 +377,94 @@ if [[ ! -e "$BINDIR/gamescale" ]]; then
     ok "uninstall removes the binary"
 else
     bad "uninstall left the binary behind"
+fi
+
+# --- the indicator extension -------------------------------------------------
+# Plain files into the user's extension directory, enabled by uuid, removed on
+# uninstall. Only from a checkout: the download path must skip it, not fetch
+# unverified extras.
+UUID="gamescale@proto-cool.github.io"
+EXTDIR="$FAKEHOME/.local/share/gnome-shell/extensions/$UUID"
+REPO_EXT="$(cd "$(dirname "$0")/.." && pwd)/extension"
+
+# Not a checkout yet: install.sh sits alone in $INST, so no extension installs.
+out=$(install_sh)
+if [[ ! -d "$EXTDIR" && "$out" == *"needs a checkout"* ]]; then
+    ok "download mode skips the extension and says why"
+else
+    bad "extension handled wrongly outside a checkout"
+    printf '%s\n' "$out" | sed 's/^/        /'
+fi
+
+cp -r "$REPO_EXT" "$INST/extension"
+out=$(install_sh)
+if [[ -r "$EXTDIR/metadata.json" && -r "$EXTDIR/extension.js" \
+      && -r "$EXTDIR/stylesheet.css" \
+      && -r "$EXTDIR/icons/gamescale-symbolic.svg" ]]; then
+    ok "checkout install places the extension files"
+else
+    bad "extension files missing after install"; find "$EXTDIR" 2>/dev/null | sed 's/^/        /'
+fi
+if grep -q "^enable $UUID\$" "$EXT_LOG"; then
+    ok "enables the extension by uuid"
+else
+    bad "extension was not enabled"; sed 's/^/        /' "$EXT_LOG"
+fi
+
+# The running shell only knows extensions it scanned at login, so
+# `gnome-extensions enable` fails on one installed since ("does not exist").
+# The installer must then append the uuid to enabled-extensions itself —
+# without dropping the user's other extensions.
+out=$(GNOME_EXT_FAIL=1 GS_LIST="['user-theme@example']" install_sh)
+setline=$(grep "^gsettings set org.gnome.shell enabled-extensions" "$EXT_LOG")
+if [[ "$setline" == *"$UUID"* && "$setline" == *"user-theme@example"* ]]; then
+    ok "falls back to enabled-extensions when the shell hasn't scanned it"
+else
+    bad "no usable enabled-extensions fallback"; sed 's/^/        /' "$EXT_LOG"
+fi
+if [[ "$out" == *"installed the indicator extension"* ]]; then
+    ok "the fallback still reports success"
+else
+    bad "fallback path did not report success"
+fi
+
+rm -rf "$EXTDIR"
+out=$(NO_EXT=1 install_sh)
+if [[ ! -d "$EXTDIR" && "$out" == *"GAMESCALE_NO_EXTENSION"* ]]; then
+    ok "GAMESCALE_NO_EXTENSION=1 skips it"
+else
+    bad "GAMESCALE_NO_EXTENSION=1 did not skip"
+fi
+
+out=$(install_sh --dry-run)
+if [[ ! -d "$EXTDIR" && "$out" == *"would:"* ]]; then
+    ok "--dry-run installs no extension files"
+else
+    bad "--dry-run touched the extension directory"
+fi
+
+out=$(install_sh)
+out=$(install_sh --uninstall)
+if [[ ! -d "$EXTDIR" ]]; then
+    ok "uninstall removes the extension"
+else
+    bad "uninstall left the extension behind"
+fi
+if grep -q "^disable $UUID\$" "$EXT_LOG"; then
+    ok "uninstall disables it first"
+else
+    bad "uninstall did not disable the extension"; sed 's/^/        /' "$EXT_LOG"
+fi
+
+# ...and scrubs the uuid from enabled-extensions even when the shell never
+# loaded it (disable fails then), keeping the user's other extensions.
+out=$(install_sh)
+out=$(GNOME_EXT_FAIL=1 GS_LIST="['user-theme@example', '$UUID']" install_sh --uninstall)
+setline=$(grep "^gsettings set org.gnome.shell enabled-extensions" "$EXT_LOG")
+if [[ "$setline" == *"user-theme@example"* && "$setline" != *"$UUID"* ]]; then
+    ok "uninstall scrubs the uuid from enabled-extensions"
+else
+    bad "uuid left in enabled-extensions"; sed 's/^/        /' "$EXT_LOG"
 fi
 
 echo

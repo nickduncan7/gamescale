@@ -82,7 +82,7 @@ set -uo pipefail
 
 # The script is copied to ~/.local/bin, so nothing else on the system records
 # which release it came from. Release CI refuses a tag that disagrees.
-readonly VERSION="1.6.0"
+readonly VERSION="1.7.0"
 
 readonly IFACE_SCHEMA="org.gnome.desktop.interface"
 # 12h ceiling. On reaching it the watchdog gives up WITHOUT restoring — a game
@@ -1363,7 +1363,7 @@ if [[ "$MODE" == "doctor" ]]; then
     # wayland: winewayland falls back to XWayland silently, so nothing
     # observable from outside the game says which one engaged.
     huh "-w cannot be checked from here: Proton falls back to XWayland silently"
-    more "and a wayland game has the SAME resolution problem (README, Wayland)"
+    more "and a wayland game has the SAME resolution problem"
     more "confirm with: flatpak run --command=xlsclients com.valvesoftware.Steam"
     # A rotted letter exports perfectly and does nothing; showing the
     # expansions is what lets a user aim suspicion at the table.
