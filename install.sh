@@ -9,8 +9,9 @@
 #   ./install.sh
 #
 # Installs the script, grants the launchers you name what they need to reach
-# the host session, installs the login reconcile unit, and runs --doctor.
-# Everything it does is printed and individually reversible; nothing needs root.
+# the host session, installs the login reconcile unit and the top-bar indicator
+# extension, and runs --doctor. Everything it does is printed and individually
+# reversible; nothing needs root.
 #
 #   --platform NAME...   which launchers to grant (default: steam)
 #   --uninstall          remove everything it installed
@@ -41,12 +42,39 @@
 #   GAMESCALE_BINDIR       install location             (default: ~/.local/bin)
 #   GAMESCALE_NO_FLATPAK   1 to skip launcher grants entirely
 #   GAMESCALE_NO_UNIT      1 to skip the login reconcile unit
+#   GAMESCALE_NO_EXTENSION 1 to skip the top-bar indicator extension
 #   GAMESCALE_NO_VERIFY    1 to install without checking the checksum
 
 set -eu
 
 REPO="proto-cool/gamescale"
 STATE_DIR="$HOME/.local/state/gamescale"
+EXT_UUID="gamescale@proto-cool.github.io"
+EXT_DIR="$HOME/.local/share/gnome-shell/extensions/$EXT_UUID"
+
+# gnome-extensions enable/disable asks the RUNNING shell, which only knows
+# extensions it scanned at login — a freshly installed one "does not exist"
+# until then. The enabled-extensions list is the ground truth the shell reads
+# when it does scan, so edit that directly as the fallback. python3 because
+# the list is a GVariant array a shell script can't append to safely, and
+# gamescale requires python3 anyway.
+ext_list_edit() {  # add|remove
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$1" "$EXT_UUID" <<'PY'
+import ast, subprocess, sys
+op, uuid = sys.argv[1:3]
+p = subprocess.run(['gsettings', 'get', 'org.gnome.shell', 'enabled-extensions'],
+                   capture_output=True, text=True)
+try:
+    cur = list(ast.literal_eval(p.stdout.strip().removeprefix('@as')))
+except (ValueError, SyntaxError):
+    cur = []
+new = [u for u in cur if u != uuid] + ([uuid] if op == 'add' else [])
+if new != cur:
+    sys.exit(subprocess.run(['gsettings', 'set', 'org.gnome.shell',
+                             'enabled-extensions', repr(new)]).returncode)
+PY
+}
 
 # name:app-id — the app id is what everything below actually uses.
 KNOWN="steam:com.valvesoftware.Steam \
@@ -85,6 +113,7 @@ gamescale installer
   GAMESCALE_BINDIR     install location             (default: ~/.local/bin)
   GAMESCALE_NO_FLATPAK 1 to skip launcher grants entirely
   GAMESCALE_NO_UNIT    1 to skip the login reconcile unit
+  GAMESCALE_NO_EXTENSION 1 to skip the top-bar indicator extension
   GAMESCALE_NO_VERIFY  1 to install without checking the checksum
 
 Full documentation: https://github.com/proto-cool/gamescale
@@ -217,6 +246,19 @@ if [ "$MODE" = "uninstall" ]; then
         act rm -f "$HOME/.config/systemd/user/gamescale-reconcile.service"
         [ "$DRY" = 1 ] || systemctl --user daemon-reload >/dev/null 2>&1 || true
         note "removed gamescale-reconcile.service"
+    fi
+
+    if [ -d "$EXT_DIR" ]; then
+        if [ "$DRY" = 1 ]; then
+            act gnome-extensions disable "$EXT_UUID"
+        else
+            gnome-extensions disable "$EXT_UUID" >/dev/null 2>&1 || true
+            # Unconditional: disable fails on an extension the shell never
+            # loaded, and the uuid must not linger in enabled-extensions.
+            ext_list_edit remove || true
+        fi
+        act rm -rf "$EXT_DIR"
+        note "removed the indicator extension"
     fi
 
     # Clean every known launcher, not just the ones named: you should not have
@@ -483,6 +525,35 @@ else
         say "installed gamescale-reconcile.service"
     else
         warn "could not install the login reconcile unit (gamescale --install-unit to retry)"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Top-bar indicator extension. Ordinary files in the user's extension
+# directory — no zip, no extensions.gnome.org. Only available from a checkout:
+# releases ship a single script, and downloading more unverifiable pieces is
+# not worth an icon.
+# ---------------------------------------------------------------------------
+
+if [ "${GAMESCALE_NO_EXTENSION:-0}" = "1" ]; then
+    say "skipping the indicator extension (GAMESCALE_NO_EXTENSION=1)"
+elif ! command -v gnome-extensions >/dev/null 2>&1; then
+    say "no gnome-extensions command — skipping the indicator extension"
+elif [ -z "$self_dir" ] || [ ! -r "$self_dir/extension/metadata.json" ]; then
+    say "indicator extension needs a checkout — clone the repo and re-run to get it"
+else
+    act mkdir -p "$EXT_DIR/icons"
+    act install -m 644 "$self_dir/extension/metadata.json" \
+                       "$self_dir/extension/extension.js" \
+                       "$self_dir/extension/stylesheet.css" "$EXT_DIR/"
+    act install -m 644 "$self_dir/extension/icons/gamescale-symbolic.svg" \
+                       "$EXT_DIR/icons/"
+    if [ "$DRY" = 1 ]; then
+        act gnome-extensions enable "$EXT_UUID"
+    elif gnome-extensions enable "$EXT_UUID" >/dev/null 2>&1 || ext_list_edit add; then
+        say "installed the indicator extension (takes effect at next login)"
+    else
+        warn "extension installed but could not be enabled — gnome-extensions enable $EXT_UUID"
     fi
 fi
 
