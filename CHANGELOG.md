@@ -3,6 +3,19 @@
 Dates are release dates. "Stranding" below means a desktop left at 1× scale,
 which is the failure this tool exists not to cause.
 
+## 1.7.1 — 2026-07-26
+
+### Fixed
+
+- **The accessibility icon was never actually suppressed.** The decision ran
+  only when the state file appeared and when the monitor layout changed —
+  both of which happen before the script raises `text-scaling-factor`, so the
+  "is Large Text really what's lit" check always answered no and the icon
+  stayed. It now also re-runs whenever an accessibility toggle changes state,
+  which is the signal the compensation itself trips. Turning another
+  accessibility feature on mid-run now brings the icon back, too, and the
+  icon can no longer stay hidden past the end of a run.
+
 ## 1.7.0 — 2026-07-26
 
 ### Added

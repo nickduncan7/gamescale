@@ -82,7 +82,7 @@ set -uo pipefail
 
 # The script is copied to ~/.local/bin, so nothing else on the system records
 # which release it came from. Release CI refuses a tag that disagrees.
-readonly VERSION="1.7.0"
+readonly VERSION="1.7.1"
 
 readonly IFACE_SCHEMA="org.gnome.desktop.interface"
 # 12h ceiling. On reaching it the watchdog gives up WITHOUT restoring — a game

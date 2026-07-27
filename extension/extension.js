@@ -102,11 +102,13 @@ export default class GamescaleExtension extends Extension {
         // monitor layout actually changes.
         this._monitorsChangedId = Main.layoutManager.connect(
             'monitors-changed', () => this._sync());
+        this._watchA11y();
         this._sync();
     }
 
     disable() {
         Main.layoutManager.disconnect(this._monitorsChangedId);
+        this._unwatchA11y();
         this._monitor?.cancel();
         this._monitor = null;
         this._hideIndicator();
@@ -121,9 +123,7 @@ export default class GamescaleExtension extends Extension {
             const state = this._readState();
             this._showIndicator();
             this._indicator.update(state, this._stale);
-            // 1.0 saved means the a11y icon appearing mid-run is ours.
-            // Unreadable state fails open: never hide an icon the user may own.
-            if (state?.textScale === 1.0)
+            if (this._a11yIsOurs(state))
                 this._suppressA11y();
             else
                 this._unsuppressA11y();
@@ -313,14 +313,53 @@ export default class GamescaleExtension extends Extension {
         this._indicator = null;
     }
 
-    // Hide the icon only when it is OURS alone. The caller established that
-    // the pre-game text scale was 1.0; on top of that: the compensated scale
-    // must actually be > 1.0 (so Large Text IS what's lit), always-show must
-    // be off, and no OTHER accessibility feature may be active — the menu's
-    // toggle states are the same list ATIndicator derives its visibility
-    // from, so >1 active toggles means the icon predates the game.
-    // Any doubt fails open: never hide an icon the user may own.
-    //
+    // Every accessibility feature is a settings-bound switch in that menu,
+    // including the "Large Text" one our compensation lights, so notify::state
+    // is the single signal for both "the icon became ours" and "it stopped
+    // being ours". Without it the decision would only ever run at state-file
+    // and monitor-layout time — both of which happen BEFORE the script raises
+    // the text scale, i.e. always on the wrong answer.
+    _watchA11y() {
+        const items = Main.panel.statusArea.a11y?.menu?._getMenuItems?.() ?? [];
+        this._a11yWatch = items
+            .filter(item => item.state !== undefined)
+            .map(item => [
+                item,
+                item.connect('notify::state', () => this._sync()),
+            ]);
+    }
+
+    _unwatchA11y() {
+        this._a11yWatch?.forEach(([item, id]) => item.disconnect(id));
+        this._a11yWatch = null;
+    }
+
+    // The icon is ours alone when: the saved (pre-game) text scale was 1.0,
+    // the current scale is actually > 1.0 (so Large Text IS what's lit),
+    // always-show is off, and no OTHER accessibility feature is active — the
+    // menu's toggle states are the same list ATIndicator derives its
+    // visibility from, so >1 active toggle means the icon predates the game.
+    // Anything unreadable answers no: never hide an icon the user may own.
+    _a11yIsOurs(state) {
+        if (state?.textScale !== 1.0)
+            return false;
+        try {
+            const iface = new Gio.Settings(
+                {schema_id: 'org.gnome.desktop.interface'});
+            if (iface.get_double('text-scaling-factor') <= 1.0)
+                return false;
+            const prefs = new Gio.Settings(
+                {schema_id: 'org.gnome.desktop.a11y'});
+            if (prefs.get_boolean('always-show-universal-access-status'))
+                return false;
+            const active = (Main.panel.statusArea.a11y?.menu
+                ?._getMenuItems?.() ?? []).filter(item => item.state === true);
+            return active.length <= 1;
+        } catch {
+            return false;
+        }
+    }
+
     // Hide the container, not the button: ATIndicator recomputes its own
     // `visible` on every settings change, so fighting it there would need its
     // private resync to undo. Nothing in current shells touches the
@@ -333,22 +372,6 @@ export default class GamescaleExtension extends Extension {
         const a11y = Main.panel.statusArea.a11y;
         if (!a11y)
             return;
-        try {
-            const iface = new Gio.Settings(
-                {schema_id: 'org.gnome.desktop.interface'});
-            if (iface.get_double('text-scaling-factor') <= 1.0)
-                return;
-            const prefs = new Gio.Settings(
-                {schema_id: 'org.gnome.desktop.a11y'});
-            if (prefs.get_boolean('always-show-universal-access-status'))
-                return;
-            const active = (a11y.menu?._getMenuItems?.() ?? [])
-                .filter(item => item.state === true);
-            if (active.length > 1)
-                return;
-        } catch {
-            return;
-        }
         this._a11y = a11y;
         this._a11ySignal = a11y.container.connect('show',
             () => a11y.container.hide());
@@ -359,7 +382,11 @@ export default class GamescaleExtension extends Extension {
         if (!this._a11ySignal)
             return;
         this._a11y.container.disconnect(this._a11ySignal);
-        this._a11y.container.visible = this._a11y.visible;
+        // Back to the shell's own default: the container always visible, the
+        // button's own `visible` deciding. Mirroring the button here would
+        // read a value its idle resync hasn't caught up to yet, and a
+        // container left hidden would outlive the run.
+        this._a11y.container.visible = true;
         this._a11y = null;
         this._a11ySignal = null;
     }
