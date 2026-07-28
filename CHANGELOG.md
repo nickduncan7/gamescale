@@ -3,6 +3,23 @@
 Dates are release dates. "Stranding" below means a desktop left at 1× scale,
 which is the failure this tool exists not to cause.
 
+## 1.7.2 — 2026-07-27
+
+### Fixed
+
+- **Windows that ignored the scale change now get nudged into repainting.**
+  Some clients — Steam's is the one that prompted this — never repaint when
+  the output's mode changes under them; they redraw on a size change and only
+  on a size change, so they sat at the old scale until something touched
+  them. Neither X11 nor Wayland has a "please redraw", so the extension now
+  shrinks each floating window by a pixel after a monitor change and gives it
+  straight back, which makes mutter send the configure that drives the
+  relayout. Maximised, tiled, fullscreen and minimised windows are left alone
+  — mutter already re-lays those out, and skipping fullscreen keeps this off
+  the game. Each window is restored on its own `size-changed` rather than a
+  shared timer: restoring while the client is still painting leaves mutter
+  stretching the stale buffer across both resizes, which smears.
+
 ## 1.7.1 — 2026-07-26
 
 ### Fixed

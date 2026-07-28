@@ -25,6 +25,13 @@ import {WindowPreview} from 'resource:///org/gnome/shell/ui/windowPreview.js';
 const SILENCE = Gio.SubprocessFlags.STDOUT_SILENCE |
                 Gio.SubprocessFlags.STDERR_SILENCE;
 
+// Wait for mutter's own relayout to settle before nudging. The hold is only
+// the fallback for windows that never report the new size — the restore is
+// normally driven by size-changed, so this is long enough to be sure rather
+// than tuned to anything.
+const NUDGE_DELAY_MS = 250;
+const NUDGE_HOLD_MS = 600;
+
 // 1.3333333730697632 → "1.33", 1.50 → "1.5", 1.00 → "1"
 function fmtScale(s) {
     return s.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
@@ -83,6 +90,8 @@ export default class GamescaleExtension extends Extension {
         this._stale = false;
         this._chromeRatio = 0;
         this._chromeUndo = [];
+        this._nudgeId = 0;
+        this._unnudgeId = 0;
         this._stateDir = Gio.File.new_for_path(GLib.build_filenamev(
             [GLib.get_home_dir(), '.local', 'state', 'gamescale']));
         this._stateFile = this._stateDir.get_child('state');
@@ -101,13 +110,17 @@ export default class GamescaleExtension extends Extension {
         // ratio below is wrong at file-appear time — recompute when the
         // monitor layout actually changes.
         this._monitorsChangedId = Main.layoutManager.connect(
-            'monitors-changed', () => this._sync());
+            'monitors-changed', () => {
+                this._sync();
+                this._scheduleNudge();
+            });
         this._watchA11y();
         this._sync();
     }
 
     disable() {
         Main.layoutManager.disconnect(this._monitorsChangedId);
+        this._cancelNudge();
         this._unwatchA11y();
         this._monitor?.cancel();
         this._monitor = null;
@@ -240,6 +253,88 @@ export default class GamescaleExtension extends Extension {
         this._chromeRatio = 0;
         this._chromeUndo.reverse().forEach(undo => undo());
         this._chromeUndo = [];
+    }
+
+    // Some clients — Steam's CEF UI is the reason this exists — never repaint
+    // when the output's mode changes under them; they redraw on a size change
+    // and only on a size change. Neither X11 nor Wayland has a "please
+    // redraw", so a 1px shrink and restore is the ask: it makes mutter send a
+    // configure, and the configure is what drives the relayout.
+    _scheduleNudge() {
+        if (this._nudgeId)
+            GLib.Source.remove(this._nudgeId);
+        this._nudgeId = GLib.timeout_add(
+            GLib.PRIORITY_DEFAULT, NUDGE_DELAY_MS, () => {
+                this._nudgeId = 0;
+                this._nudge();
+                return GLib.SOURCE_REMOVE;
+            });
+    }
+
+    // Floating windows only: maximised, tiled and fullscreen ones are already
+    // re-laid-out by mutter, and skipping fullscreen keeps this off the game.
+    //
+    // Each window gives its pixel back on its own size-changed, not on a
+    // shared timer. Restoring while the client is still painting the shrink
+    // leaves mutter stretching the stale buffer over both resizes, which is
+    // what smears; size-changed means the new size is committed, so the
+    // restore always lands on a settled frame. The timer is only the fallback
+    // for windows that never answer.
+    _nudge() {
+        this._unnudge();
+        this._nudged = [];
+        for (const actor of global.get_window_actors()) {
+            const w = actor.meta_window;
+            if (w.is_override_redirect() || w.is_fullscreen() ||
+                w.get_maximized() || w.minimized)
+                continue;
+            const r = w.get_frame_rect();
+            const entry = [w, r, 0];
+            // Connect after the request, not before: should any shell emit
+            // size-changed synchronously from it, missing that one drops the
+            // window to the timer rather than restoring it instantly — which
+            // is the smear this is here to avoid.
+            w.move_resize_frame(false, r.x, r.y, r.width - 1, r.height);
+            entry[2] = w.connect('size-changed', () => this._restore(entry));
+            this._nudged.push(entry);
+        }
+        if (!this._nudged.length)
+            return;
+        this._unnudgeId = GLib.timeout_add(
+            GLib.PRIORITY_DEFAULT, NUDGE_HOLD_MS, () => {
+                this._unnudgeId = 0;
+                this._unnudge();
+                return GLib.SOURCE_REMOVE;
+            });
+    }
+
+    // Give one window its pixel back, at most once. Disconnect first: the
+    // restore is itself a size change and would otherwise re-enter. A window
+    // closed before its turn has no compositor private and must not be
+    // touched.
+    _restore(entry) {
+        const [w, r, id] = entry;
+        if (!id)
+            return;
+        entry[2] = 0;
+        w.disconnect(id);
+        if (w.get_compositor_private())
+            w.move_resize_frame(false, r.x, r.y, r.width, r.height);
+    }
+
+    _unnudge() {
+        if (this._unnudgeId)
+            GLib.Source.remove(this._unnudgeId);
+        this._unnudgeId = 0;
+        (this._nudged ?? []).forEach(entry => this._restore(entry));
+        this._nudged = null;
+    }
+
+    _cancelNudge() {
+        if (this._nudgeId)
+            GLib.Source.remove(this._nudgeId);
+        this._nudgeId = 0;
+        this._unnudge(); // never leave a window a pixel short
     }
 
     // Same keys the script writes; anything malformed just drops out of the
