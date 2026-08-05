@@ -722,6 +722,56 @@ said "games.conf parses (2 entries)" "doctor counts the entries it understood"
 if [[ $rc -eq 0 ]]; then ok "a good games.conf is not a failure"; else
     bad "a good games.conf failed doctor"; fi
 
+# The indicator extension. The script restores with or without it, so every
+# branch here stays a warning — doctor's exit status gates the installer.
+EXTROOT="$WORK/extensions"; mkdir -p "$EXTROOT"
+EXT_V2="gamescale@arclight.digital"
+EXT_V1="gamescale@proto-cool.github.io"
+ext_doctor() { doctor GAMESCALE_NTSYNC_DEV="$NTSYNC" GAMESCALE_EXT_ROOT="$EXTROOT" "$@"; }
+
+ext_doctor
+rc=$?
+said "no indicator extension" "doctor reports a missing extension"
+if [[ $rc -eq 0 ]]; then ok "a missing extension is not a failure"; else
+    bad "a missing extension failed doctor"; fi
+
+# Installed but never enabled is the one install.sh warns about once and can
+# never mention again; it looks identical to a working install on disk.
+mkdir -p "$EXTROOT/$EXT_V2"
+ext_doctor
+rc=$?
+said "installed but not enabled" "doctor spots an extension that was never enabled"
+if [[ $rc -eq 0 ]]; then ok "an unenabled extension is a warning, not a failure"; else
+    bad "an unenabled extension failed doctor"; fi
+
+ext_doctor GS_EXT_LIST="['$EXT_V2']"
+said "installed and enabled" "doctor confirms an enabled extension"
+
+# No org.gnome.shell schema is not the same fact as "not in the list", and
+# saying so would print a confident lie plus a command that fixes nothing.
+ext_doctor GS_EXT_LIST=fail
+rc=$?
+said "cannot tell whether it is enabled" "doctor separates an unreadable list from an empty one"
+if [[ "$OUT" != *"installed but not enabled"* ]]; then
+    ok "an unreadable list is not reported as disabled"
+else
+    bad "an unreadable enabled-extensions list was read as disabled"
+fi
+if [[ $rc -eq 0 ]]; then ok "an unreadable list is a warning, not a failure"; else
+    bad "an unreadable list failed doctor"; fi
+
+# What the piped v2 installer leaves behind: it cannot ship a replacement, so
+# v1 stays and keeps drawing its own indicator.
+mkdir -p "$EXTROOT/$EXT_V1"
+ext_doctor GS_EXT_LIST="['$EXT_V2']"
+rc=$?
+said "v1 extension is still installed" "doctor reports a stranded v1 extension"
+said "second indicator" "doctor says why a stranded v1 matters"
+if [[ $rc -eq 0 ]]; then ok "a stranded v1 extension is a warning, not a failure"; else
+    bad "a stranded v1 extension failed doctor"; fi
+
+rm -rf "${EXTROOT:?}/$EXT_V1" "${EXTROOT:?}/$EXT_V2"
+
 write_games '730 = w\noops = w\n1817070 = q\n'
 doctor GAMESCALE_NTSYNC_DEV="$NTSYNC"
 rc=$?

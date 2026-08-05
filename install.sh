@@ -2,7 +2,7 @@
 #
 # gamescale installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/proto-cool/gamescale/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/arclight-digital/gamescale/main/install.sh | sh
 #
 # or, from a checkout:
 #
@@ -47,10 +47,18 @@
 
 set -eu
 
-REPO="proto-cool/gamescale"
+REPO="arclight-digital/gamescale"
 STATE_DIR="$HOME/.local/state/gamescale"
-EXT_UUID="gamescale@proto-cool.github.io"
-EXT_DIR="$HOME/.local/share/gnome-shell/extensions/$EXT_UUID"
+EXT_DIRS="$HOME/.local/share/gnome-shell/extensions"
+EXT_UUID="gamescale@arclight.digital"
+EXT_DIR="$EXT_DIRS/$EXT_UUID"
+
+# The uuid v1 shipped under. A uuid is the extension's identity to the shell,
+# so the rename installs a second extension rather than upgrading the first:
+# two indicators, and an --uninstall that leaves one behind. Removed on sight,
+# on install and on uninstall alike.
+EXT_UUID_V1="gamescale@proto-cool.github.io"
+EXT_DIR_V1="$EXT_DIRS/$EXT_UUID_V1"
 
 # gnome-extensions enable/disable asks the RUNNING shell, which only knows
 # extensions it scanned at login — a freshly installed one "does not exist"
@@ -58,9 +66,9 @@ EXT_DIR="$HOME/.local/share/gnome-shell/extensions/$EXT_UUID"
 # when it does scan, so edit that directly as the fallback. python3 because
 # the list is a GVariant array a shell script can't append to safely, and
 # gamescale requires python3 anyway.
-ext_list_edit() {  # add|remove
+ext_list_edit() {  # add|remove [UUID]
     command -v python3 >/dev/null 2>&1 || return 1
-    python3 - "$1" "$EXT_UUID" <<'PY'
+    python3 - "$1" "${2:-$EXT_UUID}" <<'PY'
 import ast, subprocess, sys
 op, uuid = sys.argv[1:3]
 p = subprocess.run(['gsettings', 'get', 'org.gnome.shell', 'enabled-extensions'],
@@ -74,6 +82,21 @@ if new != cur:
     sys.exit(subprocess.run(['gsettings', 'set', 'org.gnome.shell',
                              'enabled-extensions', repr(new)]).returncode)
 PY
+}
+
+# Disable, de-list and delete one extension. Returns 1 if there was nothing
+# there, so callers can tell a removal from a no-op without stat-ing twice.
+ext_remove() {  # ext_remove UUID DIR
+    [ -d "$2" ] || return 1
+    if [ "$DRY" = 1 ]; then
+        act gnome-extensions disable "$1"
+    else
+        gnome-extensions disable "$1" >/dev/null 2>&1 || true
+        # Unconditional: disable fails on an extension the shell never
+        # loaded, and the uuid must not linger in enabled-extensions.
+        ext_list_edit remove "$1" || true
+    fi
+    act rm -rf "$2"
 }
 
 # name:app-id — the app id is what everything below actually uses.
@@ -116,7 +139,7 @@ gamescale installer
   GAMESCALE_NO_EXTENSION 1 to skip the top-bar indicator extension
   GAMESCALE_NO_VERIFY  1 to install without checking the checksum
 
-Full documentation: https://github.com/proto-cool/gamescale
+Full documentation: https://github.com/arclight-digital/gamescale
 USAGE
 }
 
@@ -248,17 +271,11 @@ if [ "$MODE" = "uninstall" ]; then
         note "removed gamescale-reconcile.service"
     fi
 
-    if [ -d "$EXT_DIR" ]; then
-        if [ "$DRY" = 1 ]; then
-            act gnome-extensions disable "$EXT_UUID"
-        else
-            gnome-extensions disable "$EXT_UUID" >/dev/null 2>&1 || true
-            # Unconditional: disable fails on an extension the shell never
-            # loaded, and the uuid must not linger in enabled-extensions.
-            ext_list_edit remove || true
-        fi
-        act rm -rf "$EXT_DIR"
+    if ext_remove "$EXT_UUID" "$EXT_DIR"; then
         note "removed the indicator extension"
+    fi
+    if ext_remove "$EXT_UUID_V1" "$EXT_DIR_V1"; then
+        note "removed the v1 indicator extension ($EXT_UUID_V1)"
     fi
 
     # Clean every known launcher, not just the ones named: you should not have
@@ -535,13 +552,30 @@ fi
 # not worth an icon.
 # ---------------------------------------------------------------------------
 
+# v1's uuid is a different extension to the shell, so it has to be removed
+# rather than upgraded — but only where this run actually installs the
+# replacement. Every path that skips the extension leaves v1 alone and says so:
+# deleting a working indicator and putting nothing back is not an upgrade, and
+# a flag that says "skip" must not delete.
+v1_note() {
+    [ -d "$EXT_DIR_V1" ] || return 0
+    warn "the v1 extension ($EXT_UUID_V1) is still installed and will not be updated.
+   Re-run from a checkout to replace it, or --uninstall to remove it."
+}
+
 if [ "${GAMESCALE_NO_EXTENSION:-0}" = "1" ]; then
     say "skipping the indicator extension (GAMESCALE_NO_EXTENSION=1)"
+    v1_note
 elif ! command -v gnome-extensions >/dev/null 2>&1; then
     say "no gnome-extensions command — skipping the indicator extension"
+    v1_note
 elif [ -z "$self_dir" ] || [ ! -r "$self_dir/extension/metadata.json" ]; then
     say "indicator extension needs a checkout — clone the repo and re-run to get it"
+    v1_note
 else
+    if ext_remove "$EXT_UUID_V1" "$EXT_DIR_V1"; then
+        note "removed the v1 indicator extension ($EXT_UUID_V1)"
+    fi
     act mkdir -p "$EXT_DIR/icons"
     act install -m 644 "$self_dir/extension/metadata.json" \
                        "$self_dir/extension/extension.js" \

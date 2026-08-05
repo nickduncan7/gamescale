@@ -383,7 +383,7 @@ fi
 # Plain files into the user's extension directory, enabled by uuid, removed on
 # uninstall. Only from a checkout: the download path must skip it, not fetch
 # unverified extras.
-UUID="gamescale@proto-cool.github.io"
+UUID="gamescale@arclight.digital"
 EXTDIR="$FAKEHOME/.local/share/gnome-shell/extensions/$UUID"
 REPO_EXT="$(cd "$(dirname "$0")/.." && pwd)/extension"
 
@@ -465,6 +465,69 @@ if [[ "$setline" == *"user-theme@example"* && "$setline" != *"$UUID"* ]]; then
     ok "uninstall scrubs the uuid from enabled-extensions"
 else
     bad "uuid left in enabled-extensions"; sed 's/^/        /' "$EXT_LOG"
+fi
+
+# --- the v1 uuid -------------------------------------------------------------
+# v2 renamed the extension, and a uuid is an identity, not a version: the shell
+# would happily run both. The old copy is removed rather than upgraded.
+V1_UUID="gamescale@proto-cool.github.io"
+V1_DIR="$FAKEHOME/.local/share/gnome-shell/extensions/$V1_UUID"
+seed_v1() { mkdir -p "$V1_DIR/icons"; : > "$V1_DIR/metadata.json"; }
+
+seed_v1
+out=$(install_sh)
+if [[ ! -d "$V1_DIR" && "$out" == *"removed the v1 indicator extension"* ]]; then
+    ok "install removes the v1 extension"
+else
+    bad "v1 extension survived install"; printf '%s\n' "$out" | sed 's/^/        /'
+fi
+if grep -q "^disable $V1_UUID\$" "$EXT_LOG"; then
+    ok "migration disables v1 before deleting it"
+else
+    bad "v1 was deleted without being disabled"; sed 's/^/        /' "$EXT_LOG"
+fi
+
+# The migration's write comes before the new uuid's, so the first set line is
+# the one that has to have dropped v1 without touching anything else.
+seed_v1
+out=$(GNOME_EXT_FAIL=1 GS_LIST="['user-theme@example', '$V1_UUID']" install_sh)
+setline=$(grep "^gsettings set org.gnome.shell enabled-extensions" "$EXT_LOG" | head -1)
+if [[ "$setline" == *"user-theme@example"* && "$setline" != *"$V1_UUID"* ]]; then
+    ok "migration scrubs the v1 uuid from enabled-extensions"
+else
+    bad "v1 uuid left in enabled-extensions"; sed 's/^/        /' "$EXT_LOG"
+fi
+
+# Skipping the extension must not delete v1. Removing a working indicator and
+# putting nothing back is a downgrade dressed as an upgrade, and a flag that
+# says "skip" must not delete — so these paths warn and leave it.
+seed_v1
+out=$(NO_EXT=1 install_sh)
+if [[ -d "$V1_DIR" && "$out" == *"still installed and will not be updated"* ]]; then
+    ok "GAMESCALE_NO_EXTENSION=1 leaves v1 alone and warns"
+else
+    bad "NO_EXTENSION mishandled v1"; printf '%s\n' "$out" | sed 's/^/        /'
+fi
+
+# The piped installer has no extension/ beside it, so it cannot replace v1.
+mv "$INST/extension" "$WORK/extension.hidden"
+seed_v1
+out=$(install_sh)
+if [[ -d "$V1_DIR" && "$out" == *"needs a checkout"* \
+      && "$out" == *"still installed and will not be updated"* ]]; then
+    ok "download mode leaves v1 alone and warns"
+else
+    bad "download mode deleted v1 without replacing it"
+    printf '%s\n' "$out" | sed 's/^/        /'
+fi
+mv "$WORK/extension.hidden" "$INST/extension"
+
+seed_v1
+out=$(install_sh --uninstall)
+if [[ ! -d "$V1_DIR" ]]; then
+    ok "uninstall removes the v1 extension too"
+else
+    bad "uninstall left the v1 extension behind"
 fi
 
 echo

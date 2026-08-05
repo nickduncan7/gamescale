@@ -1,6 +1,6 @@
 # <img src="extension/icons/gamescale.svg" width="32" alt=""> gamescale
 
-[![ci](https://github.com/proto-cool/gamescale/actions/workflows/ci.yml/badge.svg)](https://github.com/proto-cool/gamescale/actions/workflows/ci.yml)
+[![ci](https://github.com/arclight-digital/gamescale/actions/workflows/ci.yml/badge.svg)](https://github.com/arclight-digital/gamescale/actions/workflows/ci.yml)
 
 Run a game at 1× monitor scale so XWayland hands it your panel's real mode
 instead of an overscaled framebuffer — then put your desktop back when it
@@ -33,7 +33,7 @@ reconcile unit.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/proto-cool/gamescale/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/arclight-digital/gamescale/main/install.sh | sh
 ```
 
 Or from a checkout: `./install.sh` (a checkout also installs the top-bar
@@ -41,6 +41,12 @@ indicator extension). Installs to `~/.local/bin/gamescale`, grants the
 launchers you name what they need, installs the login reconcile unit, runs
 `--doctor`. Re-runnable; downloads are checksum-verified; `--uninstall`
 removes everything.
+
+Upgrading from 1.x: the extension's uuid changed to `gamescale@arclight.digital`,
+which the shell treats as a different extension rather than a newer one.
+Installing from a checkout removes the old one and puts the new one in its
+place — log out and back in to pick it up. The piped installer ships no
+extension at all, so it leaves the old one alone and tells you it is stale.
 
 | | |
 |---|---|

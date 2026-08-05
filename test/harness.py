@@ -13,7 +13,19 @@ import io
 import pathlib
 import sys
 
+# Without PyGObject installed, `import gi` still succeeds — something else owns
+# the name as an empty namespace package — and the failure surfaces as a bare
+# AttributeError on require_version, which reads like a harness bug rather than
+# a missing dependency. Say what is actually wrong.
 import gi
+
+if not hasattr(gi, "require_version"):
+    sys.exit(
+        "PyGObject is missing: `import gi` resolved to "
+        f"{getattr(gi, '__file__', None)!r}, not the real module.\n"
+        "  Fedora: sudo dnf install python3-gobject\n"
+        "  Debian: sudo apt install python3-gi gir1.2-glib-2.0"
+    )
 
 gi.require_version("Gio", "2.0")
 gi.require_version("GLib", "2.0")

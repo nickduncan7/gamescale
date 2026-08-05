@@ -82,7 +82,7 @@ set -uo pipefail
 
 # The script is copied to ~/.local/bin, so nothing else on the system records
 # which release it came from. Release CI refuses a tag that disagrees.
-readonly VERSION="1.7.2"
+readonly VERSION="2.0.0"
 
 readonly IFACE_SCHEMA="org.gnome.desktop.interface"
 # 12h ceiling. On reaching it the watchdog gives up WITHOUT restoring — a game
@@ -360,6 +360,14 @@ readonly LASTRUN_PREFIX="${STATE_DIR}/lastrun-"
 
 # Overridable so --doctor's ntsync branch is reachable from a test.
 readonly NTSYNC_DEV="${GAMESCALE_NTSYNC_DEV:-/dev/ntsync}"
+
+# The indicator extension. The script neither needs nor talks to it — it only
+# writes the state file the extension reads — but --doctor is the one place a
+# user asks "is this set up right", and the answer includes the half that
+# install.sh cannot re-check after the fact. Overridable for tests.
+readonly EXT_ROOT="${GAMESCALE_EXT_ROOT:-${HOST_HOME}/.local/share/gnome-shell/extensions}"
+readonly EXT_UUID="gamescale@arclight.digital"
+readonly EXT_UUID_V1="gamescale@proto-cool.github.io"
 
 # Float helpers — awk, not bc, because awk is always present.
 fmul()   { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.6g", a * b }'; }
@@ -1392,13 +1400,39 @@ if [[ "$MODE" == "doctor" ]]; then
     else
         ok "no games.conf (per-game defaults unused)"
     fi
+    # The indicator is optional — restoring works with or without it — so
+    # nothing here is a failure. It catches the two states install.sh cannot
+    # report after the fact: an extension installed but never enabled, and a v1
+    # copy left behind because the piped installer had no replacement to offer.
+    if host test -d "$EXT_ROOT/$EXT_UUID"; then
+        # Separate "the list says no" from "there was no list": org.gnome.shell
+        # is absent wherever gnome-shell isn't installed, and reading that as
+        # not-enabled prints a confident lie plus a command that fixes nothing.
+        if ! EXT_ENABLED=$(host gsettings get org.gnome.shell enabled-extensions 2>/dev/null); then
+            huh "indicator extension installed; cannot tell whether it is enabled"
+            more "no org.gnome.shell schema reachable from here"
+        elif [[ "$EXT_ENABLED" == *"'$EXT_UUID'"* ]]; then
+            ok "indicator extension installed and enabled"
+        else
+            huh "indicator extension installed but not enabled"
+            more "gnome-extensions enable $EXT_UUID  (takes effect at next login)"
+        fi
+    else
+        huh "no indicator extension (optional; install.sh from a checkout adds it)"
+    fi
+    if host test -d "$EXT_ROOT/$EXT_UUID_V1"; then
+        huh "the v1 extension is still installed and will not be updated"
+        more "it draws a second indicator against the same state file"
+        more "re-run install.sh from a checkout to replace it, or remove it with:"
+        more "  rm -rf $EXT_ROOT/$EXT_UUID_V1"
+    fi
     # Installing is four independent steps; a run that died halfway leaves
     # some checks green and some red. Re-running the installer is idempotent.
     if [[ $DOCTOR_BAD -gt 0 ]]; then
         echo
         echo "  $DOCTOR_BAD check(s) failed. The installer is idempotent — re-running it"
         echo "  fixes everything above except a stale state file:"
-        echo "    curl -fsSL https://raw.githubusercontent.com/proto-cool/gamescale/main/install.sh | sh"
+        echo "    curl -fsSL https://raw.githubusercontent.com/arclight-digital/gamescale/main/install.sh | sh"
         exit 1
     fi
     exit 0

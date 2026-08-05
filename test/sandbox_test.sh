@@ -107,10 +107,23 @@ fi
 rm -f "$STATE"
 NOSPAWN="$WORK/nospawn"; mkdir -p "$NOSPAWN"
 cp "$STUBS/python3" "$STUBS/gsettings" "$NOSPAWN/"
+
+# The script finds flatpak-spawn with `command -v`, so "missing" has to mean
+# missing from PATH — and PATH still has to carry the coreutils the run uses.
+# A symlink mirror of /usr/bin with the one binary removed gives both. Naming
+# /usr/bin directly here instead passed only on runners that happen not to have
+# flatpak installed, and failed on any developer machine that does.
+SANE="$WORK/nospawn-bin"; mkdir -p "$SANE"
+cp -rs /usr/bin/. "$SANE/" 2>/dev/null || true
+rm -f "$SANE/flatpak-spawn"
+if PATH="$NOSPAWN:$SANE" command -v flatpak-spawn >/dev/null 2>&1; then
+    bad "test setup: flatpak-spawn still reachable, case is meaningless"
+fi
+
 marker="$WORK/ran"; rm -f "$marker"
 out=$(env DETECT_FIXTURE="$FIXTURE" PY_LOG="$LOG" \
     GAMESCALE_FLATPAK_INFO="$FAKE_INFO" GAMESCALE_NO_WATCH=1 \
-    HOME="$FAKEHOME" PATH="$NOSPAWN:/usr/bin:/bin" \
+    HOME="$FAKEHOME" PATH="$NOSPAWN:$SANE" \
     bash "$SCRIPT" -- touch "$marker" 2>&1)
 if [[ -f "$marker" ]]; then
     ok "no flatpak-spawn still launches the game"

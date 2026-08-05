@@ -15,6 +15,7 @@
 #   PY_FAIL_RC       exit status for apply/verify (2 = mutter refused)
 #   GS_LOG           file receiving one line per gsettings call
 #   GS_FAIL_SET      substring of a gsettings key whose `set` must fail
+#   GS_EXT_LIST      what `get org.gnome.shell enabled-extensions` returns
 #   SPAWN_LOG        file receiving each flatpak-spawn --host invocation
 #   SYSTEMD_RUN_LOG  file receiving each systemd-run invocation
 #   FAKE_KVER        kernel release `uname -r` reports (default: the real one)
@@ -77,6 +78,11 @@ fi
 case "$3" in
     text-scaling-factor) echo "${GS_TEXT_SCALE:-1.0}" ;;
     cursor-size)         echo "${GS_CURSOR_SIZE:-24}" ;;
+    enabled-extensions)
+        # gsettings exits 1 on a schema it does not have, which is what a host
+        # without gnome-shell looks like. GS_EXT_LIST=fail reproduces it.
+        [ "${GS_EXT_LIST:-}" = "fail" ] && exit 1
+        echo "${GS_EXT_LIST:-@as []}" ;;
 esac
 exit 0
 STUB

@@ -3,6 +3,71 @@
 Dates are release dates. "Stranding" below means a desktop left at 1× scale,
 which is the failure this tool exists not to cause.
 
+## 2.0.0 — 2026-08-05
+
+The project moved to the arclight org and took the extension's identity with
+it. Nothing about scaling, restoring or the watchdog changed — the major
+version is here because an extension uuid is an identity rather than a version
+number, and renaming one is not something an upgrade can do quietly.
+
+### Changed
+
+- **The indicator extension's uuid is now `gamescale@arclight.digital`**, from
+  `gamescale@proto-cool.github.io`. GNOME Shell keys an extension on its uuid
+  and its directory is named for it, so to the shell this is a different
+  extension, not a newer one: installing v2 beside an untouched v1 would leave
+  two indicators drawing the same state, and v2's `--uninstall` would walk past
+  the older one. `install.sh` therefore disables the v1 uuid, scrubs it from
+  `enabled-extensions` and deletes its directory — but only on `--uninstall`,
+  and on the install path where it actually puts v2 in its place. The piped
+  installer ships no extension, and `GAMESCALE_NO_EXTENSION=1` asks for none,
+  so both leave v1 where it is and warn that it is stale: removing a working
+  indicator and putting nothing back is a downgrade dressed as an upgrade.
+- **New icons**, monitor-and-gamepad, replacing the monitor-with-resize-tick
+  pair. The symbolic icon is now flat filled paths; the old one drew its resize
+  tick as a stroked `<line>`, and symbolic recolouring rewrites `fill` but not
+  `stroke`, so that tick stayed grey while the rest of the icon went red in the
+  stale state.
+- **The repository is `arclight-digital/gamescale`.** Install URL, release
+  asset base, badge and the extension's `url` all follow it. GitHub redirects
+  the old path, so existing installs keep working — but every copy of
+  `install.sh` already on disk has the old `REPO` baked in and cannot be
+  fixed retroactively, which is why the old name stays reserved rather than
+  released.
+- **`metadata.json` carries `version` and `version-name`.** It previously had
+  neither, leaving the shell with no way to tell two builds apart.
+
+### Fixed
+
+- **A test that was asserting on the CI image rather than on the code.** The
+  "inside flatpak with no flatpak-spawn" case built its `PATH` out of the stub
+  directory plus a literal `/usr/bin`, then expected `flatpak-spawn` not to be
+  found there. That holds on the Ubuntu runner and fails on any machine with
+  flatpak installed, so the branch it meant to cover went unexercised wherever
+  it was most likely to be run by hand. It now runs against a symlink mirror of
+  `/usr/bin` with the one binary removed, and asserts the setup before trusting
+  the result.
+- **A missing PyGObject now says so.** `import gi` succeeds even without it —
+  the name resolves to an empty namespace package — so the Python suites died
+  on `AttributeError: module 'gi' has no attribute 'require_version'`, which
+  reads like a broken harness. It now names the dependency and the package to
+  install.
+
+### Added
+
+- **`--doctor` now reports the indicator extension.** It checked ten things and
+  said nothing about the half of the install that draws on your screen, so the
+  two states it can end up in were invisible: installed but never enabled —
+  which looks identical to a working install on disk — and a v1 copy the piped
+  installer could not replace, quietly drawing a second indicator against the
+  same state file. Neither counts as a failure, because the script restores
+  with or without the extension and doctor's exit status gates the installer.
+  A missing `org.gnome.shell` schema is reported as "cannot tell" rather than
+  "not enabled": that is a different fact, and printing the confident version
+  would come with a command that fixes nothing.
+- **CI runs on `dev`.** It was pinned to `main`, so branch pushes were unbuilt
+  until a pull request existed.
+
 ## 1.7.2 — 2026-07-27
 
 ### Fixed
