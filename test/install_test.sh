@@ -468,8 +468,7 @@ else
 fi
 
 # --- the v1 uuid -------------------------------------------------------------
-# v2 renamed the extension, and a uuid is an identity, not a version: the shell
-# would happily run both. The old copy is removed rather than upgraded.
+# Removed rather than upgraded: the shell would run both side by side.
 V1_UUID="gamescale@proto-cool.github.io"
 V1_DIR="$FAKEHOME/.local/share/gnome-shell/extensions/$V1_UUID"
 seed_v1() { mkdir -p "$V1_DIR/icons"; : > "$V1_DIR/metadata.json"; }
@@ -498,9 +497,7 @@ else
     bad "v1 uuid left in enabled-extensions"; sed 's/^/        /' "$EXT_LOG"
 fi
 
-# Skipping the extension must not delete v1. Removing a working indicator and
-# putting nothing back is a downgrade dressed as an upgrade, and a flag that
-# says "skip" must not delete — so these paths warn and leave it.
+# Skipping the extension must not delete v1 — these paths warn and leave it.
 seed_v1
 out=$(NO_EXT=1 install_sh)
 if [[ -d "$V1_DIR" && "$out" == *"still installed and will not be updated"* ]]; then

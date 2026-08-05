@@ -82,7 +82,7 @@ set -uo pipefail
 
 # The script is copied to ~/.local/bin, so nothing else on the system records
 # which release it came from. Release CI refuses a tag that disagrees.
-readonly VERSION="2.0.0"
+readonly VERSION="2.0.1"
 
 readonly IFACE_SCHEMA="org.gnome.desktop.interface"
 # 12h ceiling. On reaching it the watchdog gives up WITHOUT restoring — a game
@@ -101,7 +101,6 @@ readonly SELF
 log()  { [[ "${GAMESCALE_DEBUG:-0}" == "1" ]] && echo "gamescale: $*" >&2; return 0; }
 warn() { echo "gamescale: $*" >&2; }
 
-# One definition of "well formed" per shape, shared by every parser.
 is_number()    { [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]; }
 is_integer()   { [[ "$1" =~ ^[0-9]+$ ]]; }
 is_token()     { [[ "$1" =~ ^[0-9A-Za-z-]+$ ]]; }
@@ -150,10 +149,8 @@ esac
 
 NO_SCALE=0
 NO_FONT=0; [[ "${GAMESCALE_NO_FONT:-0}" == "1" ]] && NO_FONT=1
-# Whether the command line said anything at all. This, not the individual
-# flags, is what turns the games.conf lookup off.
+# Any flag at all, not the individual flags, is what turns the lookup off.
 EXPLICIT=0
-# Set when -x is paired with a scale option; warned about once after parsing.
 SAW_SCALE_OPT=0
 USAGE_ERROR=0
 
@@ -214,7 +211,6 @@ apply_letter() {  # apply_letter LETTER SOURCE
     esac
 }
 
-# Number of leading arguments the flag parser consumed, for the caller to shift.
 FLAGS_CONSUMED=0
 
 parse_flags() {
@@ -361,10 +357,8 @@ readonly LASTRUN_PREFIX="${STATE_DIR}/lastrun-"
 # Overridable so --doctor's ntsync branch is reachable from a test.
 readonly NTSYNC_DEV="${GAMESCALE_NTSYNC_DEV:-/dev/ntsync}"
 
-# The indicator extension. The script neither needs nor talks to it — it only
-# writes the state file the extension reads — but --doctor is the one place a
-# user asks "is this set up right", and the answer includes the half that
-# install.sh cannot re-check after the fact. Overridable for tests.
+# The indicator extension. The script never talks to it — it only writes the
+# state file the extension reads — so these are for --doctor alone.
 readonly EXT_ROOT="${GAMESCALE_EXT_ROOT:-${HOST_HOME}/.local/share/gnome-shell/extensions}"
 readonly EXT_UUID="gamescale@arclight.digital"
 readonly EXT_UUID_V1="gamescale@proto-cool.github.io"
@@ -681,8 +675,7 @@ detect() {
     done
 }
 
-# Records for the current MON_* arrays into RECORDS, optionally overriding
-# every scale.
+# Fills RECORDS from the MON_* arrays, optionally overriding every scale.
 records() {  # records [SCALE]
     local i scale
     RECORDS=()
@@ -984,7 +977,6 @@ games_each() {  # games_each CALLBACK
 # variables are last by virtue of being what `export` overwrites.
 # ---------------------------------------------------------------------------
 
-# Which appid the config matched, for the source labels.
 CONFIG_APPID=""
 CONFIG_ENTRY=""
 
@@ -1072,7 +1064,6 @@ lastrun_parse() {  # lastrun_parse APPID-OR-EMPTY
     [[ -n "$lr_source" ]]
 }
 
-# Which surface decided this launch, for the record and for --status.
 env_source() {
     if [[ $EXPLICIT == 1 ]]; then printf 'flags'
     elif [[ -n "$CONFIG_APPID" ]]; then printf 'games.conf'
@@ -1400,14 +1391,13 @@ if [[ "$MODE" == "doctor" ]]; then
     else
         ok "no games.conf (per-game defaults unused)"
     fi
-    # The indicator is optional — restoring works with or without it — so
-    # nothing here is a failure. It catches the two states install.sh cannot
-    # report after the fact: an extension installed but never enabled, and a v1
-    # copy left behind because the piped installer had no replacement to offer.
+    # Never a failure: restoring works without the extension, and doctor's exit
+    # status gates the installer. These are the two states install.sh warns
+    # about once and can never mention again.
     if host test -d "$EXT_ROOT/$EXT_UUID"; then
-        # Separate "the list says no" from "there was no list": org.gnome.shell
-        # is absent wherever gnome-shell isn't installed, and reading that as
-        # not-enabled prints a confident lie plus a command that fixes nothing.
+        # "The list says no" and "there was no list" are different facts: the
+        # schema is absent wherever gnome-shell is, and reading that as
+        # not-enabled would print a fix-it command that fixes nothing.
         if ! EXT_ENABLED=$(host gsettings get org.gnome.shell enabled-extensions 2>/dev/null); then
             huh "indicator extension installed; cannot tell whether it is enabled"
             more "no org.gnome.shell schema reachable from here"

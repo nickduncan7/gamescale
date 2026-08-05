@@ -722,8 +722,8 @@ said "games.conf parses (2 entries)" "doctor counts the entries it understood"
 if [[ $rc -eq 0 ]]; then ok "a good games.conf is not a failure"; else
     bad "a good games.conf failed doctor"; fi
 
-# The indicator extension. The script restores with or without it, so every
-# branch here stays a warning — doctor's exit status gates the installer.
+# The indicator extension. Every branch stays a warning: doctor's exit status
+# gates the installer.
 EXTROOT="$WORK/extensions"; mkdir -p "$EXTROOT"
 EXT_V2="gamescale@arclight.digital"
 EXT_V1="gamescale@proto-cool.github.io"
@@ -735,8 +735,7 @@ said "no indicator extension" "doctor reports a missing extension"
 if [[ $rc -eq 0 ]]; then ok "a missing extension is not a failure"; else
     bad "a missing extension failed doctor"; fi
 
-# Installed but never enabled is the one install.sh warns about once and can
-# never mention again; it looks identical to a working install on disk.
+# Installed but never enabled looks identical to a working install on disk.
 mkdir -p "$EXTROOT/$EXT_V2"
 ext_doctor
 rc=$?
@@ -747,8 +746,7 @@ if [[ $rc -eq 0 ]]; then ok "an unenabled extension is a warning, not a failure"
 ext_doctor GS_EXT_LIST="['$EXT_V2']"
 said "installed and enabled" "doctor confirms an enabled extension"
 
-# No org.gnome.shell schema is not the same fact as "not in the list", and
-# saying so would print a confident lie plus a command that fixes nothing.
+# An absent schema is not the same fact as an empty list.
 ext_doctor GS_EXT_LIST=fail
 rc=$?
 said "cannot tell whether it is enabled" "doctor separates an unreadable list from an empty one"

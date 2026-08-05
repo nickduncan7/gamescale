@@ -108,11 +108,10 @@ rm -f "$STATE"
 NOSPAWN="$WORK/nospawn"; mkdir -p "$NOSPAWN"
 cp "$STUBS/python3" "$STUBS/gsettings" "$NOSPAWN/"
 
-# The script finds flatpak-spawn with `command -v`, so "missing" has to mean
-# missing from PATH — and PATH still has to carry the coreutils the run uses.
-# A symlink mirror of /usr/bin with the one binary removed gives both. Naming
-# /usr/bin directly here instead passed only on runners that happen not to have
-# flatpak installed, and failed on any developer machine that does.
+# `command -v` finds flatpak-spawn, so "missing" means missing from PATH — and
+# PATH still has to carry the coreutils the run uses. A symlink mirror of
+# /usr/bin with the one binary removed gives both; naming /usr/bin directly
+# only passed on runners that happen not to have flatpak installed.
 SANE="$WORK/nospawn-bin"; mkdir -p "$SANE"
 cp -rs /usr/bin/. "$SANE/" 2>/dev/null || true
 rm -f "$SANE/flatpak-spawn"

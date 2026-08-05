@@ -53,10 +53,7 @@ EXT_DIRS="$HOME/.local/share/gnome-shell/extensions"
 EXT_UUID="gamescale@arclight.digital"
 EXT_DIR="$EXT_DIRS/$EXT_UUID"
 
-# The uuid v1 shipped under. A uuid is the extension's identity to the shell,
-# so the rename installs a second extension rather than upgrading the first:
-# two indicators, and an --uninstall that leaves one behind. Removed on sight,
-# on install and on uninstall alike.
+# The uuid v1 shipped under; see the migration at the extension install below.
 EXT_UUID_V1="gamescale@proto-cool.github.io"
 EXT_DIR_V1="$EXT_DIRS/$EXT_UUID_V1"
 
@@ -149,7 +146,6 @@ while [ $# -gt 0 ]; do
         --dry-run|-n)   DRY=1; shift ;;
         --platform|-p)
             shift
-            # Consume every following value that isn't another option.
             while [ $# -gt 0 ]; do
                 case "$1" in -*) break ;; esac
                 PLATFORMS="$PLATFORMS $1"
@@ -289,10 +285,9 @@ if [ "$MODE" = "uninstall" ]; then
             overrides=$(flatpak override --user --show "$id" 2>/dev/null || true)
             [ -n "$overrides" ] || continue
 
-            # Positive evidence that WE granted this app something. Without it,
-            # an app carrying only the user's own PATH override read as
-            # "nothing but ours" and got --reset — destroying a grant gamescale
-            # never made, which is the exact thing the comment above forbids.
+            # Positive evidence that WE granted this app something: an app
+            # carrying only the user's own PATH override otherwise read as
+            # "nothing but ours" and got --reset.
             ours=0
             case "$overrides" in
                 *"$BINDIR:ro"*)        ours=1 ;;
@@ -552,11 +547,10 @@ fi
 # not worth an icon.
 # ---------------------------------------------------------------------------
 
-# v1's uuid is a different extension to the shell, so it has to be removed
-# rather than upgraded — but only where this run actually installs the
-# replacement. Every path that skips the extension leaves v1 alone and says so:
-# deleting a working indicator and putting nothing back is not an upgrade, and
-# a flag that says "skip" must not delete.
+# A uuid is an identity, not a version: the shell would run v1 and v2 side by
+# side, so v1 is removed rather than upgraded — but only where this run installs
+# the replacement. Skipping the extension leaves v1 alone and warns, because
+# deleting a working indicator and putting nothing back is not an upgrade.
 v1_note() {
     [ -d "$EXT_DIR_V1" ] || return 0
     warn "the v1 extension ($EXT_UUID_V1) is still installed and will not be updated.

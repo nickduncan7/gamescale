@@ -25,10 +25,8 @@ import {WindowPreview} from 'resource:///org/gnome/shell/ui/windowPreview.js';
 const SILENCE = Gio.SubprocessFlags.STDOUT_SILENCE |
                 Gio.SubprocessFlags.STDERR_SILENCE;
 
-// Wait for mutter's own relayout to settle before nudging. The hold is only
-// the fallback for windows that never report the new size — the restore is
-// normally driven by size-changed, so this is long enough to be sure rather
-// than tuned to anything.
+// Long enough to be sure rather than tuned: size-changed normally drives the
+// restore, and this is only the fallback for windows that never report.
 const NUDGE_DELAY_MS = 250;
 const NUDGE_HOLD_MS = 600;
 
@@ -162,11 +160,9 @@ export default class GamescaleExtension extends Extension {
         return current > 0 ? saved.scale / current : 0;
     }
 
-    // Everything the shell sizes in logical px loses the primary scale's
-    // worth of apparent size at 1.0, with no setting to say otherwise. The
-    // em-sized chrome (panel height, status icons, all text) already follows
-    // text-scaling-factor, which the script compensates — what's left is the
-    // px-sized chrome, each piece undone through this._chromeUndo.
+    // Chrome sized in logical px loses the primary scale's worth of apparent
+    // size at 1.0. The em-sized chrome already follows text-scaling-factor,
+    // which the script compensates; what's left is undone via this._chromeUndo.
     _applyChrome(ratio) {
         if (Math.abs(ratio - this._chromeRatio) < 0.01)
             return;
@@ -271,15 +267,12 @@ export default class GamescaleExtension extends Extension {
             });
     }
 
-    // Floating windows only: maximised, tiled and fullscreen ones are already
-    // re-laid-out by mutter, and skipping fullscreen keeps this off the game.
+    // Floating windows only: mutter already re-lays out maximised, tiled and
+    // fullscreen ones, and skipping fullscreen keeps this off the game.
     //
-    // Each window gives its pixel back on its own size-changed, not on a
-    // shared timer. Restoring while the client is still painting the shrink
-    // leaves mutter stretching the stale buffer over both resizes, which is
-    // what smears; size-changed means the new size is committed, so the
-    // restore always lands on a settled frame. The timer is only the fallback
-    // for windows that never answer.
+    // Each window gives its pixel back on its own size-changed, not a shared
+    // timer: restoring mid-paint leaves mutter stretching the stale buffer
+    // over both resizes, which is what smears. The timer is only the fallback.
     _nudge() {
         this._unnudge();
         this._nudged = [];

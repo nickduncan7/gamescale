@@ -13,10 +13,9 @@ import io
 import pathlib
 import sys
 
-# Without PyGObject installed, `import gi` still succeeds — something else owns
-# the name as an empty namespace package — and the failure surfaces as a bare
-# AttributeError on require_version, which reads like a harness bug rather than
-# a missing dependency. Say what is actually wrong.
+# Without PyGObject, `import gi` still succeeds against an empty namespace
+# package and fails later on require_version — an AttributeError that reads
+# like a harness bug rather than a missing dependency.
 import gi
 
 if not hasattr(gi, "require_version"):

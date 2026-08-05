@@ -3,6 +3,16 @@
 Dates are release dates. "Stranding" below means a desktop left at 1× scale,
 which is the failure this tool exists not to cause.
 
+## 2.0.1 — 2026-08-05
+
+### Changed
+
+- **Comment pass.** Deleted comments that restated the identifier beneath them
+  and compressed the longest blocks. What stayed is rationale for behaviour
+  outside this codebase — gdctl's transform numbering, Flatpak's `--unset-env`,
+  Steam's repaint-on-resize — which a reader cannot recover from the code. No
+  behaviour change; the version moves so the tag and `--doctor` agree.
+
 ## 2.0.0 — 2026-08-05
 
 The project moved to the arclight org and took the extension's identity with
